@@ -68,7 +68,7 @@ without `-t` does not make two trees diverge.
 ## Install
 
 ```sh
-git clone https://github.com/YOURNAME/dts.git
+git clone https://github.com/abalgo/dts.git
 cd dts && chmod +x *.pl
 ```
 
@@ -191,7 +191,7 @@ mutationstructure.pl [options] SOURCE.dts DESTINATION.dts
 | `--remove` | delete destination duplicates that became redundant |
 | `--minsize N` | size floor, default 100 bytes |
 | `--out FILE` | shell script (default stdout) |
-| `--new-dts FILE` | projected `.dts` of the destination after execution |
+| `--new-dts [FILE]` | projected `.dts` of the destination; without a value, derived from `DESTINATION.dts` → `DESTINATION_new.dts` |
 | `--report-mvdir` | report approximate directory matches, emit nothing |
 | `--parity-threshold F` | minimum match score, default 0.80 |
 
@@ -203,11 +203,11 @@ so the next backup does not copy everything again.
 ./dtsgen.pl --extern ~/storage/shared > phone.dts
 
 ./mutationstructure.pl --grep DCIM --remove \
-    --out plan.sh --new-dts phone_projected.dts nas.dts phone.dts
+    --out plan.sh --new-dts nas.dts phone.dts
 
 less plan.sh          # always read it first
 sh plan.sh
-./dtsgen.pl --check phone_projected.dts
+./dtsgen.pl --check phone_new.dts     # --new-dts with no value -> phone_new.dts
 ```
 
 A generated plan looks like this — one `mv` for a whole subtree, thanks to the
@@ -216,13 +216,17 @@ Merkle hash:
 ```sh
 cd 'sim/phone/DCIM' || exit 1
 mkdir -p '2024/Vacances'
-# --- repertoires ---
+
+# --- directories ---
 mv -n 'Old' 'Divers'
-# --- fichiers ---
+
+# --- files ---
 mv -n 'Camera/IMG_001.jpg' '2024/Vacances/IMG_001.jpg'
-# --- doublons (1) ---
+
+# --- duplicates (1) ---
 rm -f 'Camera/note_copie.jpg'
-# --- menage ---
+
+# --- cleanup (harmlessly fails if not empty) ---
 rmdir 'Camera' 2>/dev/null || true
 ```
 
@@ -269,10 +273,10 @@ other tree — so a file that exists on one side only does not penalise the matc
 
 ```
 [0.83] Camera  ->  2024/Vacances
-       5 communs / max(5,6)   (min : 1.00)
-       + 5 fichiers votent : IMG_001.jpg, IMG_002.jpg, IMG_003.jpg, ...
-       ~ perso.jpg : suit le dossier, absent de la source
-       ! note.jpg : suit le dossier alors qu'il releve de Divers/note.jpg
+       5 matched / max(5,6)   (min: 1.00)
+       + 5 files vote: IMG_001.jpg, IMG_002.jpg, IMG_003.jpg, ...
+       ~ perso.jpg : follows the folder, absent from source
+       ! note.jpg : follows the folder though it belongs to Divers/note.jpg
 ```
 
 The `!` lines are the ones to watch: files that would be carried along by the

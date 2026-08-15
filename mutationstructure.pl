@@ -1,28 +1,29 @@
 #!/usr/bin/perl
 # mutationstructure.pl v1.1
-# Rejoue sur une arborescence DESTINATION la structure d'une arborescence SOURCE,
-# à partir de deux fichiers .dts produits par dtsgen.pl.
-# Ne copie rien, n'efface que des doublons : produit un script shell à relire.
+# Replays the layout of a SOURCE tree onto a DESTINATION tree, using two .dts
+# files produced by dtsgen.pl.  Copies nothing, deletes only duplicates:
+# emits a shell script for you to review before running it.
 #
-# Usage : mutationstructure.pl [options] SOURCE.dts DESTINATION.dts
-#   --grep REGEX      ne considérer que les chemins correspondants
-#   --src-root PATH   racine à retirer des chemins source      (sinon déduite)
-#   --dst-root PATH   racine à retirer des chemins destination (sinon déduite)
-#   --remove          effacer les doublons destination devenus inutiles
-#   --minsize N       taille plancher, défaut 100 octets
-#   --out FILE        script shell (défaut : stdout)
-#   --new-dts FILE    .dts projeté de la destination après exécution
-#   --verbose         détail sur stderr
-#   --parity-threshold F  score minimal d'appariement approximatif (défaut 0.80)
-#   --report-mvdir    rapport des appariements de répertoires, sans rien émettre
+# Usage: mutationstructure.pl [options] SOURCE.dts DESTINATION.dts
+#   --grep REGEX      only consider matching paths
+#   --src-root PATH   prefix to strip from source paths      (else inferred)
+#   --dst-root PATH   prefix to strip from destination paths (else inferred)
+#   --remove          delete destination duplicates that became redundant
+#   --minsize N       size floor, default 100 bytes
+#   --out FILE        shell script (default: stdout)
+#   --new-dts [FILE]  projected .dts of the destination after execution;
+#                     without a value, derived from DESTINATION.dts (_new.dts)
+#   --verbose         details on stderr
+#   --parity-threshold F  minimum approximate match score (default 0.80)
+#   --report-mvdir    report directory matches, emit nothing
 #   --help  --version
 #
-# Appariement des répertoires, en deux étages :
-#   1. hash de Merkle identique  -> certain (contenus ET noms), sous-arbre consommé
-#   2. vote                      -> score = communs / max(|S'|,|D'|)
-#      où S' et D' ne comptent que les fichiers ayant un correspondant
-#      quelque part dans l'autre arbre (les fichiers propres à un côté,
-#      grosse vidéo effacée du téléphone par exemple, ne pénalisent rien).
+# Directory matching, in two stages:
+#   1. identical Merkle hash -> certain (contents AND names), subtree consumed
+#   2. voting                -> score = matched / max(|S'|,|D'|)
+#      where S' and D' only count files that have a counterpart somewhere in
+#      the other tree, so a file living on one side only (a large video kept
+#      on the NAS but deleted from the phone) does not penalise the match.
 use strict;
 use warnings;
 use Getopt::Long;
@@ -47,19 +48,23 @@ sub usage {
 GetOptions('src-root=s' => \$srcroot, 'dst-root=s' => \$dstroot,
            'grep=s'     => \$grepstr, 'remove'     => \$remove,
            'minsize=i'  => \$minsize, 'out=s'      => \$out,
-           'new-dts=s'  => \$newdts,  'verbose'    => \$verbose,
+           'new-dts:s'  => \$newdts,  'verbose'    => \$verbose,
            'parity-threshold=f' => \$parity,
            'report-mvdir'       => \$report,
            'help'       => sub { usage() },
            'version'    => sub { print "mutationstructure.pl $VERSION\n"; exit 0 })
-    or die "options invalides (--help)\n";
+    or die "invalid option (--help)\n";
 my ($SRC, $DST) = @ARGV;
 die "usage: $0 [options] SOURCE.dts DESTINATION.dts\n" unless defined $DST;
+if (defined $newdts && $newdts eq '') {      # --new-dts without a value
+    ($newdts = $DST) =~ s/\.dts\z//i;
+    $newdts .= '_new.dts';
+}
 my $RE = defined $grepstr ? qr/$grepstr/ : undef;
 
-my $EMPTYTREE = sha1("tree 0\0");                 # tous les répertoires vides
+my $EMPTYTREE = sha1("tree 0\0");                 # shared by every empty dir
 
-#--- lecture -----------------------------------------------------------------
+#--- reading -----------------------------------------------------------------
 sub read_dts {
     my ($f) = @_;
     open my $fh, '<', $f or die "$f: $!\n";
@@ -75,11 +80,11 @@ sub read_dts {
                    path  => substr($_, 92) };
     }
     close $fh;
-    die "$f: aucune ligne exploitable\n" unless @e;
+    die "$f: no usable line\n" unless @e;
     return \@e;
 }
 
-#--- détection de racine : explicite > ancre du --grep > préfixe commun -------
+#--- root detection: explicit > --grep anchor > common prefix ----------------
 sub common_prefix {
     my @l = map { [ split m{/}, $_, -1 ] } @_;
     return '' unless @l;
@@ -96,7 +101,7 @@ sub common_prefix {
 sub detect_root {
     my ($ent, $explicit, $label) = @_;
     if (defined $explicit) { $explicit =~ s{/+\z}{}; return $explicit }
-    if ($RE) {                                    # plus haut segment qui matche
+    if ($RE) {                                    # highest matching segment
         my @cand;
         for my $e (@$ent) {
             next unless $e->{path} =~ $RE;
@@ -109,12 +114,12 @@ sub detect_root {
         }
         if (@cand) {
             my $r = common_prefix(@cand);
-            warn "racine $label déduite du --grep : '$r'\n" if $verbose;
+            warn "$label root inferred from --grep: '$r'\n" if $verbose;
             return $r;
         }
     }
     my $r = common_prefix(map { $_->{path} } @$ent);
-    warn "racine $label déduite du préfixe commun : '$r'\n" if $verbose;
+    warn "$label root inferred from common prefix: '$r'\n" if $verbose;
     return $r;
 }
 
@@ -127,7 +132,7 @@ sub rel {
 
 sub depth { my $n = ($_[0] =~ tr{/}{}); return $_[0] eq '' ? -1 : $n }
 
-sub covered {                                     # rel sous un sous-arbre traité
+sub covered {                                     # rel under a consumed subtree
     my ($rel, $set) = @_;
     my $p = $rel;
     while (1) {
@@ -139,15 +144,15 @@ sub covered {                                     # rel sous un sous-arbre trait
     return 0;
 }
 
-#--- indexation --------------------------------------------------------------
+#--- indexing --------------------------------------------------------------
 my $src = read_dts($SRC);
 my $dst = read_dts($DST);
 $srcroot = detect_root($src, $srcroot, 'source');
 $dstroot = detect_root($dst, $dstroot, 'destination');
 
-my (%srcdir, %dstdir, %srcfile, %dstfile);        # rel -> entrée
-my (%sdh, %ddh, %sfk, %dfk);                      # hash/clé -> [rel...]
-my %dstall;                                       # rel -> 1, occupation réelle
+my (%srcdir, %dstdir, %srcfile, %dstfile);        # rel -> entry
+my (%sdh, %ddh, %sfk, %dfk);                      # hash/key -> [rel...]
+my %dstall;                                       # rel -> 1, actual occupancy
 
 for my $e (@$dst) {
     my $r = rel($e->{path}, $dstroot);
@@ -178,18 +183,18 @@ for my $pair ([$src, $srcroot, \%srcdir, \%srcfile, \%sdh, \%sfk],
     }
 }
 
-#--- planification -----------------------------------------------------------
+#--- planning -----------------------------------------------------------
 my @moves;                                        # {from, to, kind}
-my (%usedsrc, %useddst);                          # sous-arbres consommés
-my %taken;                                        # rel destination déjà promise
+my (%usedsrc, %useddst);                          # consumed subtrees
+my %taken;                                        # destination rel already claimed
 
-# 1) répertoires, du moins profond au plus profond
+# 1) directories, shallowest first
 for my $r (sort { depth($a) <=> depth($b) || $a cmp $b } keys %srcdir) {
     next if covered($r, \%usedsrc);
     my $h = $srcdir{$r}{hash};
-    next unless @{ $sdh{$h} } == 1;               # ambigu côté source : on passe
+    next unless @{ $sdh{$h} } == 1;               # ambiguous on the source side
     my $cands = $ddh{$h} or next;
-    if (grep { $_ eq $r } @$cands) {              # déjà au bon endroit
+    if (grep { $_ eq $r } @$cands) {              # already in the right place
         $usedsrc{$r} = $useddst{$r} = 1;
         next;
     }
@@ -201,15 +206,15 @@ for my $r (sort { depth($a) <=> depth($b) || $a cmp $b } keys %srcdir) {
     $taken{$r} = 1;
 }
 
-# 2) fichiers restants
+# 2) remaining files
 for my $r (sort keys %srcfile) {
     next if covered($r, \%usedsrc);
     my $k = $srcfile{$r}{size} . ':' . $srcfile{$r}{hash};
-    next unless @{ $sfk{$k} } == 1;               # unique côté source seulement
+    next unless @{ $sfk{$k} } == 1;               # source-side uniqueness only
     my $cands = $dfk{$k} or next;
     my @free = grep { !covered($_, \%useddst) } sort @$cands;
     next unless @free;
-    my ($keep) = grep { $_ eq $r } @free;         # déjà en place ?
+    my ($keep) = grep { $_ eq $r } @free;         # already in place?
     if (defined $keep) {
         $useddst{$keep} = 1;
         $taken{$r} = 1;
@@ -222,8 +227,8 @@ for my $r (sort keys %srcfile) {
     }
 }
 
-#--- appariement approximatif de répertoires (vote) --------------------------
-# construit la liste des fichiers descendants de chaque répertoire
+#--- approximate directory matching (voting) ---------------------------------
+# descendant file keys of every directory
 sub descend {
     my ($files) = @_;
     my %d;
@@ -240,12 +245,12 @@ sub descend {
 }
 
 sub score_pair {
-    my ($sk, $dk) = @_;                # deux listes de clés
+    my ($sk, $dk) = @_;                # two key lists
     my (%cnt, $common);
     $cnt{$_}++ for @$sk;
     for my $k (@$dk) { if (($cnt{$k} // 0) > 0) { $cnt{$k}--; $common++ } }
-    my $sp = grep { $dfk{$_} } @$sk;   # présents quelque part en destination
-    my $dp = grep { $sfk{$_} } @$dk;   # présents quelque part en source
+    my $sp = grep { $dfk{$_} } @$sk;   # present somewhere in destination
+    my $dp = grep { $sfk{$_} } @$dk;   # present somewhere in source
     my $mx = $sp > $dp ? $sp : $dp;
     my $mn = $sp < $dp ? $sp : $dp;
     return ($common // 0, $sp, $dp, $mx ? ($common // 0) / $mx : 0,
@@ -258,15 +263,15 @@ my $ddesc = descend(\%dstfile);
 my %cand;                              # "S\0D" -> 1
 for my $k (keys %sfk) {
     my $dr = $dfk{$k} or next;
-    next if @{ $sfk{$k} } > 20 || @$dr > 20;      # clé trop répandue : on passe
+    next if @{ $sfk{$k} } > 20 || @$dr > 20;      # key too common: skip
     for my $s (@{ $sfk{$k} }) {
         for my $d (@$dr) {
             my ($a, $b) = ($s, $d);
-            while (1) {                           # le couple et tous ses ancêtres
+            while (1) {                           # the pair and all its ancestors
                 my $i = rindex($a, '/'); my $j = rindex($b, '/');
                 last if $i <= 0 || $j <= 0;
                 $a = substr($a, 0, $i); $b = substr($b, 0, $j);
-                last if $a eq $b;                 # déjà au même endroit
+                last if $a eq $b;                 # already in the same place
                 $cand{"$a\0$b"} = 1;
             }
         }
@@ -283,7 +288,7 @@ for my $c (keys %cand) {
     push @pairs, { s => $s, d => $d, n => $common, sp => $sp, dp => $dp,
                    score => $sc, smin => $scmin };
 }
-# le plus haut d'abord : un seul mv couvre davantage
+# shallowest first: a single mv covers more
 @pairs = sort { depth($a->{s}) <=> depth($b->{s})
              || $b->{score} <=> $a->{score}
              || $a->{s} cmp $b->{s} } @pairs;
@@ -297,13 +302,13 @@ for my $p (@pairs) {
 }
 
 if ($report) {
-    printf "=== appariements approximatifs (seuil %.2f) ===\n", $parity;
-    printf "racine source      : '%s'\nracine destination : '%s'\n\n",
+    printf "=== approximate directory matches (threshold %.2f) ===\n", $parity;
+    printf "source root      : '%s'\ndestination root : '%s'\n\n",
            $srcroot, $dstroot;
-    unless (@accepted) { print "aucun couple au-dessus du seuil.\n"; exit 0 }
+    unless (@accepted) { print "no pair above threshold.\n"; exit 0 }
     for my $p (@accepted) {
         printf "[%.2f] %s  ->  %s\n", $p->{score}, $p->{d}, $p->{s};
-        printf "       %d communs / max(%d,%d)   (min : %.2f)\n",
+        printf "       %d matched / max(%d,%d)   (min: %.2f)\n",
                $p->{n}, $p->{sp}, $p->{dp}, $p->{smin};
         my %srckey;
         $srckey{ $srcfile{$_}{size} . ':' . $srcfile{$_}{hash} }++
@@ -316,25 +321,25 @@ if ($report) {
             elsif (my $sr = $sfk{$k})   { push @elsewhere, [$n, $sr->[0]] }
             else                        { push @stay, $n }
         }
-        printf "       + %d fichiers votent : %s%s\n", scalar(@vote),
+        printf "       + %d files vote: %s%s\n", scalar(@vote),
                join(', ', @vote[0 .. ($#vote > 2 ? 2 : $#vote)]),
                (@vote > 3 ? ", ..." : '') if @vote;
-        print  "       ~ $_ : suit le dossier, absent de la source\n" for @stay;
-        printf "       ! %s : suit le dossier alors qu'il releve de %s\n",
+        print  "       ~ $_ : follows the folder, absent from source\n" for @stay;
+        printf "       ! %s : follows the folder though it belongs to %s\n",
                $_->[0], $_->[1] for @elsewhere;
         print "\n";
     }
-    printf "%d couple(s) retenu(s) sur %d candidat(s) au-dessus du seuil.\n",
+    printf "%d pair(s) accepted out of %d candidate(s) above threshold.\n",
            scalar(@accepted), scalar(@pairs);
-    print "Aucun mv emis : --report-mvdir est un mode rapport.\n";
+    print "No mv emitted: --report-mvdir is a reporting mode.\n";
     exit 0;
 }
 
-#--- ordonnancement des mv : cibles libres d'abord, cycles par nom temporaire --
+#--- mv ordering: free targets first, cycles broken with a temporary name ----
 my (@plan, @conflict);
 {
     my %occ = %dstall;
-    delete $occ{ $_->{to} } for grep { 0 } @moves;   # rien à pré-libérer
+    delete $occ{ $_->{to} } for grep { 0 } @moves;   # nothing to pre-free
     $moves[$_]{id} = $_ for 0 .. $#moves;
     my %isfrom = map { $_->{from} => $_ } @moves;
     my @pend = @moves;
@@ -348,13 +353,13 @@ my (@plan, @conflict);
                 $occ{ $m->{to} } = 1;
                 $progress = 1;
             }
-            elsif ($isfrom{ $m->{to} }) { push @next, $m }   # en attente
-            else { push @conflict, $m }                      # occupé par un tiers
+            elsif ($isfrom{ $m->{to} }) { push @next, $m }   # waiting
+            else { push @conflict, $m }                      # held by a third party
         }
         @pend = @next;
         next if $progress;
         last unless @pend;
-        my $m = shift @pend;                      # cycle : on casse par un temp
+        my $m = shift @pend;                      # cycle: break it with a temp
         my $t = ".mutation_tmp_" . $tmp++;
         push @plan, { from => $m->{from}, to => $t, kind => $m->{kind},
                       tmp => 1, id => $m->{id} };
@@ -367,7 +372,7 @@ my (@plan, @conflict);
     }
 }
 
-#--- mv effectivement aboutis (une etape atteint la cible finale) ------------
+#--- moves that actually completed (a step reaches the final target) ---------
 my %done;
 for my $p (@plan) {
     next unless defined $p->{id};
@@ -375,7 +380,7 @@ for my $p (@plan) {
 }
 my @real = map { $moves[$_] } grep { $done{$_} } 0 .. $#moves;
 
-# 3) exemplaires surnuméraires : passe globale, y compris sous un répertoire déplacé
+# 3) surplus copies: global pass, including under a moved directory
 sub finalrel {
     my ($r) = @_;
     for my $m (@real) {
@@ -388,7 +393,7 @@ sub finalrel {
 
 my @extra;
 for my $k (keys %sfk) {
-    next unless @{ $sfk{$k} } == 1;               # unique côté source seulement
+    next unless @{ $sfk{$k} } == 1;               # source-side uniqueness only
     my $target = $sfk{$k}[0];
     my $cands  = $dfk{$k} or next;
     next unless @$cands > 1;
@@ -398,7 +403,7 @@ for my $k (keys %sfk) {
     push @extra, map { $_->[0] } grep { $_->[0] ne $keep->[0] } @f;
 }
 
-#--- garde-fou d'effacement --------------------------------------------------
+#--- deletion safeguard --------------------------------------------------
 my @rm;
 if ($remove) {
     my %doomed = map { $_ => 1 } @extra;
@@ -407,15 +412,15 @@ if ($remove) {
         next if $e->{size} < $minsize;
         my $k = $e->{size} . ':' . $e->{hash};
         my @surv = grep { !$doomed{$_} } @{ $dfk{$k} };
-        unless (@surv) {                          # ne doit jamais arriver
-            warn "REFUS d'effacer $x : aucun exemplaire ne survivrait\n";
+        unless (@surv) {                          # must never happen
+            warn "REFUSING to delete $x: no copy would survive\n";
             next;
         }
         push @rm, $x;
     }
 }
 
-#--- écriture du script ------------------------------------------------------
+#--- writing the script ------------------------------------------------------
 sub q1 { my $s = shift; $s =~ s/'/'\\''/g; return "'$s'" }
 sub parent { my $i = rindex($_[0], '/'); return $i < 0 ? '' : substr($_[0], 0, $i) }
 
@@ -423,13 +428,13 @@ my $fh;
 if ($out eq '-') { $fh = \*STDOUT } else { open $fh, '>', $out or die "$out: $!\n" }
 binmode $fh, ':raw';
 
-printf $fh "#!/bin/sh\n# genere par mutationstructure.pl\n"
-         . "#   source      : %s   (racine '%s')\n"
-         . "#   destination : %s   (racine '%s')\n"
-         . "#   filtre      : %s   taille mini : %d\n"
-         . "# A RELIRE AVANT EXECUTION.\n\nset -e\ncd %s || exit 1\n\n",
+printf $fh "#!/bin/sh\n# generated by mutationstructure.pl\n"
+         . "#   source      : %s   (root '%s')\n"
+         . "#   destination : %s   (root '%s')\n"
+         . "#   filter      : %s   min size : %d\n"
+         . "# REVIEW BEFORE RUNNING.\n\nset -e\ncd %s || exit 1\n\n",
     $SRC, $srcroot, $DST, $dstroot,
-    (defined $grepstr ? $grepstr : '(aucun)'), $minsize, q1($dstroot);
+    (defined $grepstr ? $grepstr : '(none)'), $minsize, q1($dstroot);
 
 my %mk;
 for my $m (@plan) {
@@ -442,12 +447,12 @@ print $fh "\n" if %mk;
 for my $k ('d', 'f') {
     my @s = grep { $_->{kind} eq $k } @plan;
     next unless @s;
-    print $fh $k eq 'd' ? "# --- repertoires ---\n" : "\n# --- fichiers ---\n";
+    print $fh $k eq 'd' ? "# --- directories ---\n" : "\n# --- files ---\n";
     print $fh "mv -n ", q1($_->{from}), " ", q1($_->{to}), "\n" for @s;
 }
 
 if (@rm) {
-    print $fh "\n# --- doublons (", scalar(@rm), ") ---\n";
+    print $fh "\n# --- duplicates (", scalar(@rm), ") ---\n";
     print $fh "rm -f ", q1($_), "\n" for sort @rm;
 }
 
@@ -456,20 +461,20 @@ $rd{ parent($_->{from}) } = 1 for @plan;
 $rd{ parent($_) } = 1 for @rm;
 delete $rd{''};
 if (%rd) {
-    print $fh "\n# --- menage (echoue sans dommage si non vide) ---\n";
+    print $fh "\n# --- cleanup (harmlessly fails if not empty) ---\n";
     print $fh "rmdir ", q1($_), " 2>/dev/null || true\n"
         for sort { depth($b) <=> depth($a) || $b cmp $a } keys %rd;
 }
 
 if (@conflict) {
-    print $fh "\n# --- NON TRAITES : cible deja occupee par autre chose ---\n";
+    print $fh "\n# --- SKIPPED: target already holds something else ---\n";
     print $fh "# mv ", q1($_->{from}), " ", q1($_->{to}), "\n" for @conflict;
 }
 close $fh unless $out eq '-';
 
-#--- .dts projeté ------------------------------------------------------------
+#--- projected .dts ------------------------------------------------------------
 if (defined $newdts) {
-    my %map = map { $_->{from} => $_->{to} } @real;   # ancien rel -> nouveau rel
+    my %map = map { $_->{from} => $_->{to} } @real;   # old rel -> new rel
     my %gone = map { $_ => 1 } @rm;
 
     my (%leaf, %dirmt, %all);
@@ -492,13 +497,13 @@ if (defined $newdts) {
         $all{$full} = 1;
     }
 
-    my %orig = map { $_->{path} => 1 } @$dst;     # racines d'origine du .dts
+    my %orig = map { $_->{path} => 1 } @$dst;     # original roots of the .dts
     my %istop;
     for my $p (keys %orig) {
         my $i = rindex($p, '/');
         $istop{$p} = 1 if $i <= 0 || !$orig{ substr($p, 0, $i) };
     }
-    my %kids;                                     # reconstruction de l'arbre
+    my %kids;                                     # rebuild the tree
     for my $p (keys %all) {
         my $c = $p;
         until ($istop{$c}) {
@@ -516,7 +521,7 @@ if (defined $newdts) {
     binmode $nf, ':raw';
     walk($nf, \%leaf, \%dirmt, \%kids, $_) for @tops;
     close $nf;
-    warn "$newdts écrit\n" if $verbose;
+    warn "$newdts written\n" if $verbose;
 }
 
 sub walk {
@@ -546,6 +551,6 @@ sub utcof {
             $t[5]+1900, $t[4]+1, $t[3], $t[2], $t[1], $t[0];
 }
 
-warn sprintf("%d mv (%d rep., %d fic.), %d rm, %d conflits\n",
+warn sprintf("%d mv (%d dirs, %d files), %d rm, %d conflicts\n",
      scalar(@plan), scalar(grep { $_->{kind} eq 'd' } @plan),
      scalar(grep { $_->{kind} eq 'f' } @plan), scalar(@rm), scalar(@conflict));
