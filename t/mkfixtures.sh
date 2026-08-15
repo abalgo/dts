@@ -119,5 +119,15 @@ mkdir -p "$F/dst.orig"
 for n in a b c d; do mk "$F/dst.orig/Old/$n.jpg" "p$n"; done
 mk "$F/dst.orig/Old/dup/a.jpg" pa    # duplicate, travels with the folder
 
+#--- 9. a folder whose match is its own ancestor -----------------------------
+# The source has no "media" level, so dst Android/media and src Android hold
+# the same entries and hash alike: the planner used to emit
+# `mv Android/media Android`, which cannot run, and the consumed subtree then
+# hid the files from the file pass, leaving them behind for good.
+F="$FIX/nested"
+for n in 1 2 3 4 5; do mk "$F/src/Android/clip$n.mp3" "n$n"; done
+mkdir -p "$F/dst.orig"
+for n in 1 2 3 4 5; do mk "$F/dst.orig/Android/media/clip$n.mp3" "n$n"; done
+
 echo "fixtures built in $FIX"
 ls "$FIX"

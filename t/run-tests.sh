@@ -18,7 +18,7 @@ WORK=${1:-${TMPDIR:-/tmp}/dts-tests}
 FIX="$WORK/fix"
 BASE="$HERE/baseline"          # committed: the reference plans of the default mode
 
-FIXTURES="reg video bang subrename fuzzyswap below pingpong dupmove"
+FIXTURES="reg video bang subrename fuzzyswap below pingpong dupmove nested"
 pass=0
 fail=0
 
@@ -133,6 +133,16 @@ grep -q 'mutation_tmp' "$FIX/fuzzyswap/work-fuzzy/plan.sh" \
 grep -q "^rm -f 'Photos/dup/a.jpg'" "$FIX/dupmove/work-fuzzy/plan.sh" \
     && ok "dupmove: duplicate removed at its post-move path" \
     || nok "dupmove: the rm does not use the post-move path"
+# never move a folder onto its own ancestor, in either mode; the files must
+# still travel one by one instead of being silently left behind
+for mode in off fuzzy; do
+    if grep -q "mv 'Android/media' 'Android'" "$FIX/nested/work-$mode/plan.sh"
+    then nok "nested ($mode): emitted a move onto the mover's own ancestor"
+    elif [ "$(grep -c "^mv -n 'Android/media/clip" "$FIX/nested/work-$mode/plan.sh")" -eq 5 ]
+    then ok  "nested ($mode): contents relocated file by file"
+    else nok "nested ($mode): the files were left behind"
+    fi
+done
 
 echo
 echo "7. dtsgen.pl --update"

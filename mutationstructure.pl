@@ -138,6 +138,21 @@ sub rel {
 
 sub depth { my $n = ($_[0] =~ tr{/}{}); return $_[0] eq '' ? -1 : $n }
 
+# A directory name is not part of its own Merkle hash, so a folder and an
+# ancestor holding nothing else hash the same: `Android/media` (destination)
+# matches `Android` (source) when the media level does not exist there.  The
+# resulting `mv Android/media Android` cannot work - the target is the mover's
+# own ancestor - and worse, claiming the pair marks the subtree consumed, so the
+# file pass skips it and the contents never move at all.  Refuse both nesting
+# directions; the files are then relocated one by one, which is correct.
+sub nested {
+    my ($a, $b) = @_;
+    return 1 if $a eq $b;
+    return 1 if index($a, "$b/") == 0;
+    return 1 if index($b, "$a/") == 0;
+    return 0;
+}
+
 sub covered {                                     # rel under a consumed subtree
     my ($rel, $set) = @_;
     my $p = $rel;
@@ -213,8 +228,9 @@ sub plan_dirs_exact {
             $usedsrc{$r} = $useddst{$r} = 1;
             next;
         }
-        my ($pick) = grep { !covered($_, \%useddst) } sort @$cands;
-        next unless defined $pick;
+        my ($pick) = grep { !covered($_, \%useddst) && !nested($_, $r) }
+                     sort @$cands;
+        next unless defined $pick;      # nothing claimed: the file pass takes over
         push @moves, { from => $pick, to => $r, kind => 'd' };
         $usedsrc{$r} = 1;
         $useddst{$pick} = 1;
@@ -304,6 +320,7 @@ sub fuzzy_pairs {
     my @pairs;
     for my $c (keys %cand) {
         my ($s, $d) = split /\0/, $c, 2;
+        next if nested($s, $d);        # would move a folder onto its own ancestor
         next if covered($s, \%usedsrc) || covered($d, \%useddst);
         next unless $sdesc->{$s} && $ddesc->{$d};
         my ($common, $sp, $dp, $sc, $scmin) =
