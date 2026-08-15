@@ -1,3 +1,10 @@
+# signature files describe your whole filesystem - never commit them
 *.dts
+
+# local agent context - not published
+CLAUDE.md
+
+# generated plans and scratch files
 plan.sh
 tmpuniq.*
+*_new.dts

@@ -1,0 +1,9 @@
+# Inventories: expose the full layout of the author's disks. Never read.
+*.dts
+
+# Generated artefacts
+plan.sh
+tmpuniq.*
+
+# VCS internals
+.git/

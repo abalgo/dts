@@ -194,6 +194,7 @@ mutationstructure.pl [options] SOURCE.dts DESTINATION.dts
 | `--new-dts [FILE]` | projected `.dts` of the destination; without a value, derived from `DESTINATION.dts` → `DESTINATION_new.dts` |
 | `--report-mvdir` | report approximate directory matches, emit nothing |
 | `--parity-threshold F` | minimum match score, default 0.80 |
+| `--fuzzy-dirs` | act on approximate matches instead of only reporting them |
 
 Typical use: you reorganised photos on the NAS and want the phone to follow,
 so the next backup does not copy everything again.
@@ -255,7 +256,7 @@ the real ones are assigned by the kernel at `mv` time. They are not part of the
 Merkle hash, so comparisons are unaffected — but compare on `cut -c1-57,93-`
 rather than whole lines.
 
-### Approximate directory matching (report only)
+### Approximate directory matching
 
 A directory that gained or lost a file no longer matches by Merkle hash, even
 though it is clearly "the same folder" — a large video kept on the NAS but
@@ -282,9 +283,32 @@ other tree — so a file that exists on one side only does not penalise the matc
 The `!` lines are the ones to watch: files that would be carried along by the
 move although they belong somewhere else.
 
-**This is currently a reporting mode only.** Approximate matches are not wired
-into the planner yet, because moving them safely requires a relocation pass for
-those `!` files. Use it to calibrate the threshold on your own data.
+`--report-mvdir` emits nothing. Use it to calibrate `--parity-threshold` on your
+own data, then pass `--fuzzy-dirs` to act on the matches.
+
+#### `--fuzzy-dirs`
+
+Off by default: without it the plan is exactly what it has always been.
+
+With it, an accepted pair becomes a real directory move — one `mv` instead of a
+thousand — and the planner then **runs again on the resulting layout**, so the
+files the folder dragged along are sorted out:
+
+```sh
+mv -n 'Camera' '2024/Vacances'   # fuzzy 0.83
+
+# --- files (round 2) ---
+mv -n '2024/Vacances/note.jpg' 'Divers/note.jpg'
+```
+
+The `!` file is relocated to where the source puts it; the `~` file, which
+exists only on the destination side, stays with its neighbours — that is the
+point of tolerating an imperfect match. The score is printed next to the move so
+it is visible at review time.
+
+Rounds repeat until nothing moves, capped at five (a warning is printed if the
+cap is hit). A folder pair that was only approximate in one round is often exact
+in the next, once its stray files have left.
 
 ---
 

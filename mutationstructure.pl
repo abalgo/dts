@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-# mutationstructure.pl v1.1
+# mutationstructure.pl v1.2
 # Replays the layout of a SOURCE tree onto a DESTINATION tree, using two .dts
 # files produced by dtsgen.pl.  Copies nothing, deletes only duplicates:
 # emits a shell script for you to review before running it.
@@ -15,6 +15,10 @@
 #                     without a value, derived from DESTINATION.dts (_new.dts)
 #   --verbose         details on stderr
 #   --parity-threshold F  minimum approximate match score (default 0.80)
+#   --fuzzy-dirs      act on approximate matches: move the folder, then
+#                     relocate the files it carried along but that belong
+#                     elsewhere.  Off by default; without it the plan is
+#                     exactly what it has always been.
 #   --report-mvdir    report directory matches, emit nothing
 #   --help  --version
 #
@@ -36,7 +40,8 @@ my $out     = '-';
 my $verbose = 0;
 my $parity  = 0.80;
 my $report  = 0;
-my $VERSION = 'v1.1';
+my $fuzzy   = 0;
+my $VERSION = 'v1.2';
 
 sub usage {
     open my $me, '<', $0 or die "$0: $!\n";
@@ -51,6 +56,7 @@ GetOptions('src-root=s' => \$srcroot, 'dst-root=s' => \$dstroot,
            'new-dts:s'  => \$newdts,  'verbose'    => \$verbose,
            'parity-threshold=f' => \$parity,
            'report-mvdir'       => \$report,
+           'fuzzy-dirs'         => \$fuzzy,
            'help'       => sub { usage() },
            'version'    => sub { print "mutationstructure.pl $VERSION\n"; exit 0 })
     or die "invalid option (--help)\n";
@@ -154,20 +160,17 @@ my (%srcdir, %dstdir, %srcfile, %dstfile);        # rel -> entry
 my (%sdh, %ddh, %sfk, %dfk);                      # hash/key -> [rel...]
 my %dstall;                                       # rel -> 1, actual occupancy
 
-for my $e (@$dst) {
-    my $r = rel($e->{path}, $dstroot);
-    next unless defined $r && length $r;
-    $e->{rel} = $r;
-    $dstall{$r} = 1;
-}
+$_->{rel} = rel($_->{path}, $srcroot) for @$src;
+$_->{rel} = rel($_->{path}, $dstroot) for @$dst;
 
-for my $pair ([$src, $srcroot, \%srcdir, \%srcfile, \%sdh, \%sfk],
-              [$dst, $dstroot, \%dstdir, \%dstfile, \%ddh, \%dfk]) {
-    my ($ent, $root, $dh, $fh, $byh, $byk) = @$pair;
+# Rebuilt from {rel} and {hash}, both of which the virtual rounds rewrite, so
+# this runs once per round rather than once per program.
+sub index_side {
+    my ($ent, $dh, $fh, $byh, $byk) = @_;
+    %$dh = (); %$fh = (); %$byh = (); %$byk = ();
     for my $e (@$ent) {
-        my $r = rel($e->{path}, $root);
+        my $r = $e->{rel};
         next unless defined $r && length $r;
-        $e->{rel} = $r;
         next if $RE && $e->{path} !~ $RE;
         if ($e->{type} eq 'd') {
             next if $e->{hash} eq unpack('H*', $EMPTYTREE);
@@ -183,47 +186,62 @@ for my $pair ([$src, $srcroot, \%srcdir, \%srcfile, \%sdh, \%sfk],
     }
 }
 
+sub index_dst {
+    %dstall = ();
+    for my $e (@$dst) {
+        $dstall{ $e->{rel} } = 1 if defined $e->{rel} && length $e->{rel};
+    }
+    index_side($dst, \%dstdir, \%dstfile, \%ddh, \%dfk);
+}
+
+index_side($src, \%srcdir, \%srcfile, \%sdh, \%sfk);
+index_dst();
+
 #--- planning -----------------------------------------------------------
-my @moves;                                        # {from, to, kind}
-my (%usedsrc, %useddst);                          # consumed subtrees
+my @moves;                                        # {from, to, kind} of one round
+my (%usedsrc, %useddst);                          # consumed subtrees, per round
 my %taken;                                        # destination rel already claimed
 
 # 1) directories, shallowest first
-for my $r (sort { depth($a) <=> depth($b) || $a cmp $b } keys %srcdir) {
-    next if covered($r, \%usedsrc);
-    my $h = $srcdir{$r}{hash};
-    next unless @{ $sdh{$h} } == 1;               # ambiguous on the source side
-    my $cands = $ddh{$h} or next;
-    if (grep { $_ eq $r } @$cands) {              # already in the right place
-        $usedsrc{$r} = $useddst{$r} = 1;
-        next;
+sub plan_dirs_exact {
+    for my $r (sort { depth($a) <=> depth($b) || $a cmp $b } keys %srcdir) {
+        next if covered($r, \%usedsrc);
+        my $h = $srcdir{$r}{hash};
+        next unless @{ $sdh{$h} } == 1;           # ambiguous on the source side
+        my $cands = $ddh{$h} or next;
+        if (grep { $_ eq $r } @$cands) {          # already in the right place
+            $usedsrc{$r} = $useddst{$r} = 1;
+            next;
+        }
+        my ($pick) = grep { !covered($_, \%useddst) } sort @$cands;
+        next unless defined $pick;
+        push @moves, { from => $pick, to => $r, kind => 'd' };
+        $usedsrc{$r} = 1;
+        $useddst{$pick} = 1;
+        $taken{$r} = 1;
     }
-    my ($pick) = grep { !covered($_, \%useddst) } sort @$cands;
-    next unless defined $pick;
-    push @moves, { from => $pick, to => $r, kind => 'd' };
-    $usedsrc{$r} = 1;
-    $useddst{$pick} = 1;
-    $taken{$r} = 1;
 }
 
 # 2) remaining files
-for my $r (sort keys %srcfile) {
-    next if covered($r, \%usedsrc);
-    my $k = $srcfile{$r}{size} . ':' . $srcfile{$r}{hash};
-    next unless @{ $sfk{$k} } == 1;               # source-side uniqueness only
-    my $cands = $dfk{$k} or next;
-    my @free = grep { !covered($_, \%useddst) } sort @$cands;
-    next unless @free;
-    my ($keep) = grep { $_ eq $r } @free;         # already in place?
-    if (defined $keep) {
-        $useddst{$keep} = 1;
-        $taken{$r} = 1;
-    }
-    else {
-        $keep = $free[0];
-        push @moves, { from => $keep, to => $r, kind => 'f' };
-        $useddst{$keep} = 1;
-        $taken{$r} = 1;
+sub plan_files {
+    for my $r (sort keys %srcfile) {
+        next if covered($r, \%usedsrc);
+        my $k = $srcfile{$r}{size} . ':' . $srcfile{$r}{hash};
+        next unless @{ $sfk{$k} } == 1;           # source-side uniqueness only
+        my $cands = $dfk{$k} or next;
+        my @free = grep { !covered($_, \%useddst) } sort @$cands;
+        next unless @free;
+        my ($keep) = grep { $_ eq $r } @free;     # already in place?
+        if (defined $keep) {
+            $useddst{$keep} = 1;
+            $taken{$r} = 1;
+        }
+        else {
+            $keep = $free[0];
+            push @moves, { from => $keep, to => $r, kind => 'f' };
+            $useddst{$keep} = 1;
+            $taken{$r} = 1;
+        }
     }
 }
 
@@ -257,51 +275,114 @@ sub score_pair {
                                     $mn ? ($common // 0) / $mn : 0);
 }
 
-my $sdesc = descend(\%srcfile);
-my $ddesc = descend(\%dstfile);
+my $npairs = 0;                        # candidates above threshold, last call
 
-my %cand;                              # "S\0D" -> 1
-for my $k (keys %sfk) {
-    my $dr = $dfk{$k} or next;
-    next if @{ $sfk{$k} } > 20 || @$dr > 20;      # key too common: skip
-    for my $s (@{ $sfk{$k} }) {
-        for my $d (@$dr) {
-            my ($a, $b) = ($s, $d);
-            while (1) {                           # the pair and all its ancestors
-                my $i = rindex($a, '/'); my $j = rindex($b, '/');
-                last if $i <= 0 || $j <= 0;
-                $a = substr($a, 0, $i); $b = substr($b, 0, $j);
-                last if $a eq $b;                 # already in the same place
-                $cand{"$a\0$b"} = 1;
+# Scores every candidate pair against the CURRENT index, so a later round sees
+# the post-move state.  Returns the accepted pairs, shallowest first.
+sub fuzzy_pairs {
+    my $sdesc = descend(\%srcfile);
+    my $ddesc = descend(\%dstfile);
+
+    my %cand;                          # "S\0D" -> 1
+    for my $k (keys %sfk) {
+        my $dr = $dfk{$k} or next;
+        next if @{ $sfk{$k} } > 20 || @$dr > 20;  # key too common: skip
+        for my $s (@{ $sfk{$k} }) {
+            for my $d (@$dr) {
+                my ($a, $b) = ($s, $d);
+                while (1) {                       # the pair and all its ancestors
+                    my $i = rindex($a, '/'); my $j = rindex($b, '/');
+                    last if $i <= 0 || $j <= 0;
+                    $a = substr($a, 0, $i); $b = substr($b, 0, $j);
+                    last if $a eq $b;             # already in the same place
+                    $cand{"$a\0$b"} = 1;
+                }
             }
         }
     }
+
+    my @pairs;
+    for my $c (keys %cand) {
+        my ($s, $d) = split /\0/, $c, 2;
+        next if covered($s, \%usedsrc) || covered($d, \%useddst);
+        next unless $sdesc->{$s} && $ddesc->{$d};
+        my ($common, $sp, $dp, $sc, $scmin) =
+            score_pair($sdesc->{$s}, $ddesc->{$d});
+        next unless $sc >= $parity;
+        push @pairs, { s => $s, d => $d, n => $common, sp => $sp, dp => $dp,
+                       score => $sc, smin => $scmin };
+    }
+    # shallowest first: a single mv covers more
+    @pairs = sort { depth($a->{s}) <=> depth($b->{s})
+                 || $b->{score} <=> $a->{score}
+                 || $a->{s} cmp $b->{s} } @pairs;
+    $npairs = scalar @pairs;
+
+    my (@accepted, %psrc, %pdst);
+    for my $p (@pairs) {
+        next if covered($p->{s}, \%psrc) || covered($p->{d}, \%pdst);
+        next if $psrc{ $p->{s} } || $pdst{ $p->{d} };
+        push @accepted, $p;
+        $psrc{ $p->{s} } = $pdst{ $p->{d} } = 1;
+    }
+    return @accepted;
 }
 
-my @pairs;
-for my $c (keys %cand) {
-    my ($s, $d) = split /\0/, $c, 2;
-    next if covered($s, \%usedsrc) || covered($d, \%useddst);
-    next unless $sdesc->{$s} && $ddesc->{$d};
-    my ($common, $sp, $dp, $sc, $scmin) = score_pair($sdesc->{$s}, $ddesc->{$d});
-    next unless $sc >= $parity;
-    push @pairs, { s => $s, d => $d, n => $common, sp => $sp, dp => $dp,
-                   score => $sc, smin => $scmin };
+#--- virtual application: the planner is re-run against the post-move state ---
+# Directory hashes must be recomputed, otherwise round N+1 would match a folder
+# on a Merkle hash that the moves of round N already invalidated.
+sub rehash_dst {
+    my (%leaf, %dir, %kids);
+    for my $e (@$dst) {
+        my $r = $e->{rel};
+        next unless defined $r && length $r;
+        if ($e->{type} eq 'd') { $dir{$r} = $e } else { $leaf{$r} = $e }
+        my $i = rindex($r, '/');
+        $kids{ substr($r, 0, $i) }{ substr($r, $i + 1) } = 1 if $i > 0;
+    }
+    my (%digest, %size);
+    for my $r (sort { depth($b) <=> depth($a) || $b cmp $a } keys %dir) {
+        my ($pay, $tot) = ('', 0);
+        for my $n (sort keys %{ $kids{$r} || {} }) {   # byte sort, as dtsgen.pl
+            my $c = "$r/$n";
+            my ($t, $d, $s);
+            if (my $l = $leaf{$c}) {
+                ($t, $d) = ($l->{type}, pack('H*', $l->{hash}));
+                $s = $l->{type} eq 'f' ? $l->{size} : 0;
+            }
+            else { ($t, $d, $s) = ('d', $digest{$c}, $size{$c} // 0) }
+            next unless defined $d;
+            $pay .= "$t $n\0$d";
+            $tot += $s;
+        }
+        $digest{$r} = sha1('tree ' . length($pay) . "\0" . $pay);
+        $size{$r}   = $tot;
+        $dir{$r}{hash} = unpack('H*', $digest{$r});
+        $dir{$r}{size} = $tot;
+    }
 }
-# shallowest first: a single mv covers more
-@pairs = sort { depth($a->{s}) <=> depth($b->{s})
-             || $b->{score} <=> $a->{score}
-             || $a->{s} cmp $b->{s} } @pairs;
 
-my (@accepted, %psrc, %pdst);
-for my $p (@pairs) {
-    next if covered($p->{s}, \%psrc) || covered($p->{d}, \%pdst);
-    next if $psrc{ $p->{s} } || $pdst{ $p->{d} };
-    push @accepted, $p;
-    $psrc{ $p->{s} } = $pdst{ $p->{d} } = 1;
+sub apply_virtual {
+    my ($done) = @_;
+    my %map = map { $_->{from} => $_->{to} } @$done;
+    return unless %map;
+    for my $e (@$dst) {
+        my $r = $e->{rel};
+        next unless defined $r && length $r;
+        for my $from (sort { length($b) <=> length($a) } keys %map) {
+            if ($r eq $from) { $e->{rel} = $map{$from}; last }
+            if (index($r, "$from/") == 0) {
+                $e->{rel} = $map{$from} . substr($r, length $from);
+                last;
+            }
+        }
+    }
+    rehash_dst();
 }
 
 if ($report) {
+    plan_dirs_exact();                 # same starting point as the planner
+    my @accepted = fuzzy_pairs();
     printf "=== approximate directory matches (threshold %.2f) ===\n", $parity;
     printf "source root      : '%s'\ndestination root : '%s'\n\n",
            $srcroot, $dstroot;
@@ -330,25 +411,28 @@ if ($report) {
         print "\n";
     }
     printf "%d pair(s) accepted out of %d candidate(s) above threshold.\n",
-           scalar(@accepted), scalar(@pairs);
+           scalar(@accepted), $npairs;
     print "No mv emitted: --report-mvdir is a reporting mode.\n";
+    print "Pass --fuzzy-dirs to act on them.\n" unless $fuzzy;
     exit 0;
 }
 
 #--- mv ordering: free targets first, cycles broken with a temporary name ----
+# Runs once per round: a step of round N+1 starts from a path that only exists
+# after round N, so rounds may never be interleaved.
 my (@plan, @conflict);
-{
+my $tmpseq = 0;                                   # unique across rounds
+
+sub schedule {
     my %occ = %dstall;
-    delete $occ{ $_->{to} } for grep { 0 } @moves;   # nothing to pre-free
-    $moves[$_]{id} = $_ for 0 .. $#moves;
     my %isfrom = map { $_->{from} => $_ } @moves;
     my @pend = @moves;
-    my $tmp  = 0;
+    my @out;
     while (@pend) {
         my (@next, $progress);
         for my $m (@pend) {
             if (!$occ{ $m->{to} }) {
-                push @plan, $m;
+                push @out, $m;
                 delete $occ{ $m->{from} };
                 $occ{ $m->{to} } = 1;
                 $progress = 1;
@@ -360,47 +444,78 @@ my (@plan, @conflict);
         next if $progress;
         last unless @pend;
         my $m = shift @pend;                      # cycle: break it with a temp
-        my $t = ".mutation_tmp_" . $tmp++;
-        push @plan, { from => $m->{from}, to => $t, kind => $m->{kind},
-                      tmp => 1, id => $m->{id} };
+        my $t = ".mutation_tmp_" . $tmpseq++;
+        push @out, { from => $m->{from}, to => $t, kind => $m->{kind},
+                     tmp => 1, orig => $m->{orig}, round => $m->{round} };
         delete $occ{ $m->{from} };
         delete $isfrom{ $m->{from} };
         push @pend, { from => $t, to => $m->{to}, kind => $m->{kind},
-                      tmp => 1, id => $m->{id} };
+                      tmp => 1, orig => $m->{orig}, round => $m->{round},
+                      score => $m->{score} };
         $isfrom{$t} = 1;
         $occ{$t} = 1;
     }
-}
-
-#--- moves that actually completed (a step reaches the final target) ---------
-my %done;
-for my $p (@plan) {
-    next unless defined $p->{id};
-    $done{ $p->{id} } = 1 if $p->{to} eq $moves[ $p->{id} ]{to};
-}
-my @real = map { $moves[$_] } grep { $done{$_} } 0 .. $#moves;
-
-# 3) surplus copies: global pass, including under a moved directory
-sub finalrel {
-    my ($r) = @_;
-    for my $m (@real) {
-        return $m->{to} if $r eq $m->{from};
-        return $m->{to} . substr($r, length $m->{from})
-            if index($r, $m->{from} . '/') == 0;
+    push @plan, @out;
+    # a logical move completed when one of its steps reached the final target
+    for my $p (@out) {
+        my $o = $p->{orig} or next;
+        $o->{done} = 1 if $p->{to} eq $o->{to};
     }
-    return $r;
 }
 
+#--- rounds ------------------------------------------------------------------
+# Round 1 is the historical planner.  With --fuzzy-dirs the state is advanced
+# virtually and the whole planner re-run, so files that an approximate folder
+# carried along surface as ordinary file moves in the next round.
+my $MAXROUNDS = 5;
+my $round     = 0;
+while (1) {
+    $round++;
+    index_dst() if $round > 1;
+    @moves   = ();
+    %usedsrc = (); %useddst = (); %taken = ();
+
+    plan_dirs_exact();
+    if ($fuzzy) {
+        for my $p (fuzzy_pairs()) {
+            push @moves, { from => $p->{d}, to => $p->{s}, kind => 'd',
+                           score => $p->{score} };
+            # consumed for THIS round's file pass only, so the dir move is not
+            # duplicated file by file; the next round re-examines the contents
+            $usedsrc{ $p->{s} } = 1;
+            $useddst{ $p->{d} } = 1;
+            $taken{ $p->{s} }   = 1;
+        }
+    }
+    plan_files();
+
+    @moves = grep { $_->{from} ne $_->{to} } @moves;    # net no-ops
+    last unless @moves;
+    $_->{orig} = $_, $_->{round} = $round for @moves;
+    my $before = scalar @plan;
+    schedule();
+    last if scalar @plan == $before;                    # nothing schedulable
+    apply_virtual([ grep { $_->{done} } @moves ]);
+
+    last unless $fuzzy;
+    if ($round >= $MAXROUNDS) {
+        warn "round cap ($MAXROUNDS) reached: the plan may be incomplete\n";
+        last;
+    }
+}
+index_dst();                   # surplus pass works on final, post-move paths
+
+# 3) surplus copies: global pass, on the final layout
 my @extra;
 for my $k (keys %sfk) {
     next unless @{ $sfk{$k} } == 1;               # source-side uniqueness only
     my $target = $sfk{$k}[0];
     my $cands  = $dfk{$k} or next;
     next unless @$cands > 1;
-    my @f = map { [ $_, finalrel($_) ] } sort @$cands;
-    my ($keep) = grep { $_->[1] eq $target } @f;
-    $keep = $f[0] unless $keep;                   # aucun ne tombe juste : on garde le 1er
-    push @extra, map { $_->[0] } grep { $_->[0] ne $keep->[0] } @f;
+    my @f = sort @$cands;                         # already the post-move paths
+    my ($keep) = grep { $_ eq $target } @f;
+    $keep = $f[0] unless defined $keep;           # none lands right: keep the first
+    push @extra, grep { $_ ne $keep } @f;
 }
 
 #--- deletion safeguard --------------------------------------------------
@@ -444,11 +559,21 @@ for my $m (@plan) {
 }
 print $fh "\n" if %mk;
 
-for my $k ('d', 'f') {
-    my @s = grep { $_->{kind} eq $k } @plan;
-    next unless @s;
-    print $fh $k eq 'd' ? "# --- directories ---\n" : "\n# --- files ---\n";
-    print $fh "mv -n ", q1($_->{from}), " ", q1($_->{to}), "\n" for @s;
+# Rounds in order, directories before files inside a round: a step of round N+1
+# starts from a path that only exists once round N has run.
+for my $rnd (1 .. $round) {
+    for my $k ('d', 'f') {
+        my @s = grep { ($_->{round} // 1) == $rnd && $_->{kind} eq $k } @plan;
+        next unless @s;
+        my $what = $k eq 'd' ? 'directories' : 'files';
+        print $fh $k eq 'd' && $rnd == 1 ? '' : "\n";
+        print $fh "# --- $what", ($rnd > 1 ? " (round $rnd)" : ''), " ---\n";
+        for my $m (@s) {
+            print $fh "mv -n ", q1($m->{from}), " ", q1($m->{to});
+            printf $fh "   # fuzzy %.2f", $m->{score} if defined $m->{score};
+            print $fh "\n";
+        }
+    }
 }
 
 if (@rm) {
@@ -474,7 +599,8 @@ close $fh unless $out eq '-';
 
 #--- projected .dts ------------------------------------------------------------
 if (defined $newdts) {
-    my %map = map { $_->{from} => $_->{to} } @real;   # old rel -> new rel
+    # {rel} already carries the final position: apply_virtual() rewrote it round
+    # by round, so no mapping has to be composed here.
     my %gone = map { $_ => 1 } @rm;
 
     my (%leaf, %dirmt, %all);
@@ -483,18 +609,29 @@ if (defined $newdts) {
         my $full = $e->{path};
         if (defined $r && length $r) {
             next if $gone{$r};
-            my $n = $r;
-            for my $from (sort { length($b) <=> length($a) } keys %map) {
-                if ($r eq $from) { $n = $map{$from}; last }
-                if (index($r, "$from/") == 0) {
-                    $n = $map{$from} . substr($r, length $from); last;
-                }
-            }
-            $full = $dstroot eq '' ? $n : "$dstroot/$n";
+            $full = $dstroot eq '' ? $r : "$dstroot/$r";
         }
         if ($e->{type} eq 'd') { $dirmt{$full} = $e->{stamp} }
         else                   { $leaf{$full}  = $e }
         $all{$full} = 1;
+    }
+
+    # the script ends with `rmdir` over %rd, deepest first: a directory the plan
+    # emptied is gone from the disk, so it must be gone from the projection too.
+    # Without this the parent's Merkle payload keeps a phantom empty child.
+    my %live;                                     # full path -> surviving children
+    for my $p (keys %all) {
+        my $i = rindex($p, '/');
+        $live{ substr($p, 0, $i) }++ if $i > 0;
+    }
+    for my $r (sort { depth($b) <=> depth($a) || $b cmp $a } keys %rd) {
+        my $full = $dstroot eq '' ? $r : "$dstroot/$r";
+        next if !$all{$full} || $leaf{$full};     # absent, or not a directory
+        next if $live{$full};                     # not empty: the rmdir fails
+        delete $all{$full};
+        delete $dirmt{$full};
+        my $i = rindex($full, '/');
+        $live{ substr($full, 0, $i) }-- if $i > 0;
     }
 
     my %orig = map { $_->{path} => 1 } @$dst;     # original roots of the .dts
