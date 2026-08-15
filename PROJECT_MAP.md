@@ -43,7 +43,7 @@ any .dts ──dts.pl──> duplicate report / rm script / updated .dts
 
 `--update` reuses the ordinary walk with `cached()` plugged in, so a refreshed
 inventory cannot drift from a generated one; `--add-missing` makes the two
-byte-identical. Writes `FILE_new.dts` and `TmpDelete.dts`.
+byte-identical. Writes `FILE_new.dts` and `TmpDeleted.dts`.
 
 ## `mutationstructure.pl` — entry points
 

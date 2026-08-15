@@ -17,7 +17,7 @@
 #   --update F.dts    refresh an inventory: roots come from the .dts, entries
 #                     whose size AND mtime still match keep their digest, the
 #                     others are re-hashed, vanished ones are dropped.
-#                     Writes F_new.dts and TmpDelete.dts (the dropped lines).
+#                     Writes F_new.dts and TmpDeleted.dts (the dropped lines).
 #   --add-missing     with --update, also inventory files the .dts never had
 #   --help  --version
 use strict;
@@ -291,7 +291,7 @@ if (defined $check) {
 }
 
 #--- --update: refresh an existing .dts instead of walking named roots -------
-my ($newdts, $deldts) = (undef, 'TmpDelete.dts');
+my ($newdts, $deldts) = (undef, 'TmpDeleted.dts');
 if (defined $update) {
     die "--update takes no ROOT argument (the roots come from the .dts)\n"
         if @ARGV;

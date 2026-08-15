@@ -161,8 +161,8 @@ fi
 # the vanished entry leaves, and lands in the deletion list
 if grep -q 'three.txt' "$U/base_new.dts"
 then nok "--update: a vanished file survived"
-elif grep -q 'three.txt' "$U/TmpDelete.dts"
-then ok  "--update: vanished file dropped and listed in TmpDelete.dts"
+elif grep -q 'three.txt' "$U/TmpDeleted.dts"
+then ok  "--update: vanished file dropped and listed in TmpDeleted.dts"
 else nok "--update: vanished file is in neither file"
 fi
 # only the drifting files are re-read
@@ -174,7 +174,7 @@ else nok "--update: unexpected accounting"; grep -E 'unchanged' "$U/up.log"
 fi
 # the strong one: with --add-missing the result must equal a fresh inventory
 ( cd "$U"
-  rm -f base_new.dts TmpDelete.dts
+  rm -f base_new.dts TmpDeleted.dts
   perl "$REPO/dtsgen.pl" --update base.dts --add-missing > /dev/null 2>&1
   perl "$REPO/dtsgen.pl" tree > fresh.dts 2>/dev/null
 )

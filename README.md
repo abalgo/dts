@@ -144,7 +144,7 @@ Two files are written, and the input `.dts` is left untouched:
 | File | Contents |
 |---|---|
 | `FILE_new.dts` | the refreshed inventory |
-| `TmpDelete.dts` | the lines that were dropped, verbatim |
+| `TmpDeleted.dts` | the lines that were dropped, verbatim |
 
 Without `--add-missing` the refreshed inventory describes **the same set of
 paths as before**, minus what disappeared: a file the `.dts` never knew about
@@ -157,7 +157,7 @@ Running `--update` twice changes nothing the second time.
 Two things worth knowing before trusting the output:
 
 - **If the volume is not mounted**, every entry looks vanished: `FILE_new.dts`
-  comes out near-empty and `TmpDelete.dts` holds the whole inventory. Nothing is
+  comes out near-empty and `TmpDeleted.dts` holds the whole inventory. Nothing is
   lost — your original `.dts` is untouched — but check the counts before
   replacing it. A missing root is reported as an error, not silently.
 - Without `--add-missing`, a directory whose contents are **all** new is
