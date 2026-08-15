@@ -135,5 +135,69 @@ grep -q "^rm -f 'Photos/dup/a.jpg'" "$FIX/dupmove/work-fuzzy/plan.sh" \
     || nok "dupmove: the rm does not use the post-move path"
 
 echo
+echo "7. dtsgen.pl --update"
+U="$WORK/upd"
+rm -rf "$U"; mkdir -p "$U"
+( cd "$U"
+  mkf() { mkdir -p "$(dirname "$1")"; printf 'id:%s\npad pad pad pad pad pad\n' "$2" > "$1"; }
+  mkf tree/a/one.txt one
+  mkf tree/a/two.txt two
+  mkf tree/b/three.txt three
+  mkf tree/keep.txt keep
+  mkdir -p tree/emptydir
+  perl "$REPO/dtsgen.pl" tree > base.dts 2>/dev/null
+  sleep 1
+  mkf tree/a/two.txt CHANGED          # content drift
+  touch tree/keep.txt                 # mtime-only drift
+  rm tree/b/three.txt                 # vanished
+  mkf tree/b/added.txt added          # new
+  perl "$REPO/dtsgen.pl" --update base.dts > up.log 2>&1
+)
+# the refreshed inventory must not invent entries the .dts never had
+if grep -q 'added.txt' "$U/base_new.dts"
+then nok "--update: picked up a new file without --add-missing"
+else ok  "--update: new files ignored by default"
+fi
+# the vanished entry leaves, and lands in the deletion list
+if grep -q 'three.txt' "$U/base_new.dts"
+then nok "--update: a vanished file survived"
+elif grep -q 'three.txt' "$U/TmpDelete.dts"
+then ok  "--update: vanished file dropped and listed in TmpDelete.dts"
+else nok "--update: vanished file is in neither file"
+fi
+# only the drifting files are re-read
+# one.txt untouched; two.txt content-changed and keep.txt mtime-touched are
+# both re-read; three.txt is gone
+if grep -q '1 unchanged, 2 re-hashed, 1 gone' "$U/up.log"
+then ok  "--update: mtime and size decide what is re-hashed"
+else nok "--update: unexpected accounting"; grep -E 'unchanged' "$U/up.log"
+fi
+# the strong one: with --add-missing the result must equal a fresh inventory
+( cd "$U"
+  rm -f base_new.dts TmpDelete.dts
+  perl "$REPO/dtsgen.pl" --update base.dts --add-missing > /dev/null 2>&1
+  perl "$REPO/dtsgen.pl" tree > fresh.dts 2>/dev/null
+)
+if diff -q "$U/base_new.dts" "$U/fresh.dts" > /dev/null
+then ok  "--update --add-missing: byte-identical to a fresh dtsgen.pl run"
+else nok "--update --add-missing: differs from a fresh run"
+     diff "$U/fresh.dts" "$U/base_new.dts" | head -10
+fi
+# running it again must change nothing
+( cd "$U"
+  cp base_new.dts idem.dts
+  perl "$REPO/dtsgen.pl" --update idem.dts --add-missing > /dev/null 2>&1
+)
+if diff -q "$U/idem_new.dts" "$U/idem.dts" > /dev/null
+then ok  "--update: idempotent"
+else nok "--update: a second run drifts"
+fi
+# --add-missing alone is refused
+if perl "$REPO/dtsgen.pl" --add-missing > /dev/null 2>&1
+then nok "--add-missing without --update was accepted"
+else ok  "--add-missing without --update is refused"
+fi
+
+echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

@@ -38,6 +38,12 @@ any .dts ──dts.pl──> duplicate report / rm script / updated .dts
 | `visit()` | recursive walk; returns (type, raw digest, cumulative size) |
 | `flush_batch()` | one `sha1sum` exec per batch of 1000 files (`--extern`), matched **by path** |
 | `hash_file()`, `emit()`, `utc()` | local hashing and line formatting |
+| `stamp()` | mtime → columns 59-75; shared with `--update`'s staleness test |
+| `cached()` | `--update`: reuse the stored digest when size and mtime both match |
+
+`--update` reuses the ordinary walk with `cached()` plugged in, so a refreshed
+inventory cannot drift from a generated one; `--add-missing` makes the two
+byte-identical. Writes `FILE_new.dts` and `TmpDelete.dts`.
 
 ## `mutationstructure.pl` — entry points
 

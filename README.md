@@ -106,6 +106,7 @@ On Termux: `pkg install perl` then `termux-fix-shebang *.pl`, or just call
 dtsgen.pl [--xdev] [--exclude REGEX]... [--max-size Mo]
           [--extern] [--batch N] [--verbose] ROOT...
 dtsgen.pl --check FILE.dts
+dtsgen.pl --update FILE.dts [--add-missing]
 ```
 
 | Option | Effect |
@@ -117,12 +118,51 @@ dtsgen.pl --check FILE.dts
 | `--batch N` | batch size and progress step (default 1000) |
 | `--verbose` | pre-pass, progress, throughput, ETA |
 | `--check F.dts` | verify presence, type and size — no hashing; exit 1 on drift |
+| `--update F.dts` | refresh an inventory in place of re-hashing everything |
+| `--add-missing` | with `--update`, also take in files the `.dts` never had |
 
 Symlinks are hashed on their target string and **never followed** — except a
 root you name explicitly on the command line, which is followed.
 
 Output is written as it goes and unbuffered: killing the process leaves a valid
 partial file, never a truncated line.
+
+### `--update` — refresh an inventory without re-reading everything
+
+```sh
+./dtsgen.pl --update phone.dts --add-missing
+```
+
+The roots come from the `.dts`, so no `ROOT` argument is given. Every file whose
+**size and mtime both still match** keeps its recorded digest and is not read at
+all; any drift on either field means the file is re-hashed. Vanished entries are
+dropped. Directory hashes and mtimes are always recomputed — a directory hash
+depends on entries that may have gone.
+
+Two files are written, and the input `.dts` is left untouched:
+
+| File | Contents |
+|---|---|
+| `FILE_new.dts` | the refreshed inventory |
+| `TmpDelete.dts` | the lines that were dropped, verbatim |
+
+Without `--add-missing` the refreshed inventory describes **the same set of
+paths as before**, minus what disappeared: a file the `.dts` never knew about
+stays out, and the run reports how many were ignored. With `--add-missing` the
+result is byte-for-byte what a full `dtsgen.pl` run would produce — that
+equality is what the test suite checks.
+
+Running `--update` twice changes nothing the second time.
+
+Two things worth knowing before trusting the output:
+
+- **If the volume is not mounted**, every entry looks vanished: `FILE_new.dts`
+  comes out near-empty and `TmpDelete.dts` holds the whole inventory. Nothing is
+  lost — your original `.dts` is untouched — but check the counts before
+  replacing it. A missing root is reported as an error, not silently.
+- Without `--add-missing`, a directory whose contents are **all** new is
+  inventoried as empty, with the empty-tree hash. It is the rule working as
+  specified, but the line reads as if the folder were empty on disk.
 
 ### About `--extern`
 
