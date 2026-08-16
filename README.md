@@ -302,33 +302,27 @@ A directory that gained or lost a file no longer matches by Merkle hash, even
 though it is clearly "the same folder" — a large video kept on the NAS but
 deleted from the phone, for instance.
 
-`--report-mvdir` scores candidate pairs by voting on their **direct children**:
-each child matched between the two sides is one vote, and
+`--report-mvdir` scores candidate pairs by voting on their **direct children**.
+Each child contributes one digest — a file its content hash, a subdirectory its
+own directory hash, never its contents — and
 
 ```
 score = matched / max(|S'|, |D'|)
 ```
 
-where `S'` and `D'` count only children that have a counterpart *somewhere* in
-the other tree — so content that exists on one side only does not penalise the
-match.
+where `S'` and `D'` count only children whose digest exists *somewhere* in the
+other tree, so content living on one side only does not penalise the match.
 
-Children are compared by **content hash**, which is the Merkle hash with names
-left out:
+The digest used here is a **content hash**: the same construction as the Merkle
+hash but with names left out, so a folder whose files were all renamed still
+matches. It is computed on the fly from the `.dts` — no format change, and
+nothing to re-hash.
 
-```
-chash(file) = its sha1
-chash(dir)  = sha1("cont " + len + "\0" + concat(sorted(chash(direct children))))
-```
-
-So a folder whose files were *all* renamed is still recognised — renumbered
-camera exports, a date-prefixing app — which the Merkle hash cannot do, since
-names are part of it. The content hash is derived from the `.dts` on the fly:
-no format change, and existing inventories need no re-hashing.
-
-A pair is not considered at all when one path sits inside the other, when the
-destination path already exists as a source directory, or when a single child
-would decide the vote — one child scores 0 or 1, which no threshold can filter.
+A pair is rejected when one side is an ancestor of the other (the move could not
+be executed: in the destination tree the target is the source's own parent), when
+the destination directory already has a counterpart at the same relative path, or
+when either side has fewer than two comparable children — a single child scores
+either 0 or 1 and carries no useful resolution.
 
 ```
 [0.83] Camera  ->  2024/Vacances
@@ -337,6 +331,14 @@ would decide the vote — one child scores 0 or 1, which no threshold can filter
        ~ perso.jpg : follows the folder, absent from source
        ! note.jpg : follows the folder though it belongs to Divers/note.jpg
 ```
+
+Why direct children rather than the whole subtree: counting every descendant
+lets a directory compete with its own child, since it contains everything the
+child does plus more. On a real 82k-file inventory that produced pairs like
+`Android/media → Android` at 0.98 — the parent borrowing the evidence of an
+alignment that was already correct. Direct-children scoring mirrors what the
+Merkle hash already does, where a subdirectory enters its parent as a single
+entry rather than being flattened into it.
 
 The `!` lines are the ones to watch: files that would be carried along by the
 move although they belong somewhere else.
@@ -372,6 +374,11 @@ in the next, once its stray files have left.
 
 ## Known limitations
 
+- **Nesting differences are not folded into one move.** When the same content
+  sits one level deeper on one side (`X/{f}` versus `X/sub/{f}`), no directory
+  move is possible — the target would be the source's own parent — so the files
+  are moved individually and the emptied folder is `rmdir`'d. Correct, just not
+  compact.
 - **Case-insensitive filesystems** (NTFS, Android shared storage) preserve case
   but ignore it for lookup. `Foo` and `foo` are one file yet produce different
   tree hashes — relevant only when comparing a `.dts` across such a boundary.
