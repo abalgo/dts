@@ -80,7 +80,7 @@ the other two tools by years. Do not modernise without being asked.
 
 ## Testing
 
-`sh t/run-tests.sh` — 8 fixtures, 61 assertions. Each fixture's plan is
+`sh t/run-tests.sh` — 11 fixtures, 93 assertions. Each fixture's plan is
 **executed for real**, then re-inventoried and diffed against `--new-dts`.
 `t/baseline/` holds the committed reference plans of the default mode.
 
