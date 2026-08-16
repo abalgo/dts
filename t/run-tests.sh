@@ -18,7 +18,7 @@ WORK=${1:-${TMPDIR:-/tmp}/dts-tests}
 FIX="$WORK/fix"
 BASE="$HERE/baseline"          # committed: the reference plans of the default mode
 
-FIXTURES="reg video bang subrename fuzzyswap below pingpong dupmove nested"
+FIXTURES="reg video bang subrename fuzzyswap below pingpong dupmove nested chain chainsibs"
 pass=0
 fail=0
 
@@ -133,6 +133,25 @@ grep -q 'mutation_tmp' "$FIX/fuzzyswap/work-fuzzy/plan.sh" \
 grep -q "^rm -f 'Photos/dup/a.jpg'" "$FIX/dupmove/work-fuzzy/plan.sh" \
     && ok "dupmove: duplicate removed at its post-move path" \
     || nok "dupmove: the rm does not use the post-move path"
+# a single direct child scores 0 or 1, so the threshold filters nothing: the
+# vote must abstain rather than claim the chain
+if grep -q '^# --- directories' "$FIX/chain/work-fuzzy/plan.sh"
+then nok "chain: a directory was claimed on a single child"
+elif grep -q "^mv -n 'Chain/P/Q/two.txt' 'Chain/A/B/one.txt'" \
+              "$FIX/chain/work-fuzzy/plan.sh"
+then ok  "chain: vote abstains, the file moves on its own"
+else nok "chain: the file was not relocated"
+fi
+# with three renamed siblings the content hash recognises the folder, which
+# Merkle cannot do since names are inside it
+if grep -q "^mv -n 'Chain/P/Q' 'Chain/A/B'" "$FIX/chainsibs/work-fuzzy/plan.sh"
+then ok  "chainsibs: folder matched on content despite every name differing"
+else nok "chainsibs: the renamed folder was not recognised"
+fi
+if grep -q "^mv -n 'Chain/P/Q' 'Chain/A/B'" "$FIX/chainsibs/work-off/plan.sh"
+then nok "chainsibs: default mode emitted a fuzzy folder move"
+else ok  "chainsibs: default mode leaves the folder alone"
+fi
 # never move a folder onto its own ancestor, in either mode; the files must
 # still travel one by one instead of being silently left behind
 for mode in off fuzzy; do

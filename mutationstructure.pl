@@ -138,21 +138,6 @@ sub rel {
 
 sub depth { my $n = ($_[0] =~ tr{/}{}); return $_[0] eq '' ? -1 : $n }
 
-# A directory name is not part of its own Merkle hash, so a folder and an
-# ancestor holding nothing else hash the same: `Android/media` (destination)
-# matches `Android` (source) when the media level does not exist there.  The
-# resulting `mv Android/media Android` cannot work - the target is the mover's
-# own ancestor - and worse, claiming the pair marks the subtree consumed, so the
-# file pass skips it and the contents never move at all.  Refuse both nesting
-# directions; the files are then relocated one by one, which is correct.
-sub nested {
-    my ($a, $b) = @_;
-    return 1 if $a eq $b;
-    return 1 if index($a, "$b/") == 0;
-    return 1 if index($b, "$a/") == 0;
-    return 0;
-}
-
 sub covered {                                     # rel under a consumed subtree
     my ($rel, $set) = @_;
     my $p = $rel;
@@ -228,9 +213,9 @@ sub plan_dirs_exact {
             $usedsrc{$r} = $useddst{$r} = 1;
             next;
         }
-        my ($pick) = grep { !covered($_, \%useddst) && !nested($_, $r) }
+        my ($pick) = grep { !covered($_, \%useddst) && !related($_, $r) }
                      sort @$cands;
-        next unless defined $pick;      # nothing claimed: the file pass takes over
+        next unless defined $pick;
         push @moves, { from => $pick, to => $r, kind => 'd' };
         $usedsrc{$r} = 1;
         $useddst{$pick} = 1;
@@ -262,33 +247,66 @@ sub plan_files {
 }
 
 #--- approximate directory matching (voting) ---------------------------------
-# descendant file keys of every directory
-sub descend {
-    my ($files) = @_;
-    my %d;
-    for my $r (keys %$files) {
-        my $k = $files->{$r}{size} . ':' . $files->{$r}{hash};
-        my $c = $r;
-        while ((my $i = rindex($c, '/')) > 0) {
-            $c = substr($c, 0, $i);
-            push @{ $d{$c} }, $k;
-        }
-        push @{ $d{''} }, $k;
-    }
-    return \%d;
+# A pair where one side is an ancestor of the other cannot be realised as a mv:
+# in the DESTINATION namespace the target is the source's own parent (or child)
+# and is occupied.  Such pairs also used to consume their subtrees before
+# schedule() spotted the conflict, silently suppressing the file moves.
+sub related {
+    my ($a, $b) = @_;
+    return $a eq $b || index($a, "$b/") == 0 || index($b, "$a/") == 0;
 }
 
+# Content hash: the Merkle hash with names left out, so renames are tolerated.
+#   chash(file) = its content digest
+#   chash(dir)  = sha1("cont " + len + "\0" + concat(sorted(chash(children))))
+# Direct children only -- a subdirectory contributes ONE digest, never its
+# contents.  Computed on the fly from the .dts; no format change.
+sub chash {
+    my ($p, $leaf, $kids, $memo) = @_;
+    return $memo->{$p} if exists $memo->{$p};
+    return $memo->{$p} = pack('H*', $leaf->{$p}{hash}) if exists $leaf->{$p};
+    my @d = map { chash($_, $leaf, $kids, $memo) }
+            sort keys %{ $kids->{$p} || {} };
+    my $pay = join '', sort grep { defined } @d;
+    return $memo->{$p} = sha1('cont ' . length($pay) . "\0" . $pay);
+}
+
+# child_index: builds %kids and the per-tree memo, then the digest of every
+# direct child of every directory.  Returns (\%children, \%present).
+sub child_index {
+    my ($files, $dirs) = @_;
+    my %kids;
+    for my $r (keys %$files, keys %$dirs) {
+        my $i = rindex($r, '/');
+        $kids{ $i > 0 ? substr($r, 0, $i) : '' }{$r} = 1;
+    }
+    my %memo;
+    my (%children, %present);
+    for my $p (keys %$dirs) {
+        my @c = map { unpack 'H*', chash($_, $files, \%kids, \%memo) }
+                sort keys %{ $kids{$p} || {} };
+        $children{$p} = \@c;
+        $present{$_}  = 1 for @c;
+    }
+    return (\%children, \%present);
+}
+
+# score = matched / max(|S'|,|D'|), on DIRECT children only.
+# S' and D' keep only children whose digest exists somewhere in the other tree,
+# so content living on one side alone (a video deleted from the phone) does not
+# penalise the match.
 sub score_pair {
-    my ($sk, $dk) = @_;                # two key lists
+    my ($S, $D, $inD, $inS) = @_;
     my (%cnt, $common);
-    $cnt{$_}++ for @$sk;
-    for my $k (@$dk) { if (($cnt{$k} // 0) > 0) { $cnt{$k}--; $common++ } }
-    my $sp = grep { $dfk{$_} } @$sk;   # present somewhere in destination
-    my $dp = grep { $sfk{$_} } @$dk;   # present somewhere in source
+    $cnt{$_}++ for @$S;
+    for my $k (@$D) { if (($cnt{$k} // 0) > 0) { $cnt{$k}--; $common++ } }
+    my $sp = grep { $inD->{$_} } @$S;
+    my $dp = grep { $inS->{$_} } @$D;
     my $mx = $sp > $dp ? $sp : $dp;
     my $mn = $sp < $dp ? $sp : $dp;
-    return ($common // 0, $sp, $dp, $mx ? ($common // 0) / $mx : 0,
-                                    $mn ? ($common // 0) / $mn : 0);
+    $common //= 0;
+    return ($common, $sp, $dp, $mx ? $common / $mx : 0, $mn ? $common / $mn : 0,
+            $mn);
 }
 
 my $npairs = 0;                        # candidates above threshold, last call
@@ -296,8 +314,8 @@ my $npairs = 0;                        # candidates above threshold, last call
 # Scores every candidate pair against the CURRENT index, so a later round sees
 # the post-move state.  Returns the accepted pairs, shallowest first.
 sub fuzzy_pairs {
-    my $sdesc = descend(\%srcfile);
-    my $ddesc = descend(\%dstfile);
+    my ($schild, $sin) = child_index(\%srcfile, \%srcdir);
+    my ($dchild, $din) = child_index(\%dstfile, \%dstdir);
 
     my %cand;                          # "S\0D" -> 1
     for my $k (keys %sfk) {
@@ -320,12 +338,14 @@ sub fuzzy_pairs {
     my @pairs;
     for my $c (keys %cand) {
         my ($s, $d) = split /\0/, $c, 2;
-        next if nested($s, $d);        # would move a folder onto its own ancestor
+        next if related($s, $d);                  # cannot mv onto own ancestor
+        next if $srcdir{$d};                      # D is already aligned
         next if covered($s, \%usedsrc) || covered($d, \%useddst);
-        next unless $sdesc->{$s} && $ddesc->{$d};
-        my ($common, $sp, $dp, $sc, $scmin) =
-            score_pair($sdesc->{$s}, $ddesc->{$d});
+        next unless $schild->{$s} && $dchild->{$d};
+        my ($common, $sp, $dp, $sc, $scmin, $mn) =
+            score_pair($schild->{$s}, $dchild->{$d}, $din, $sin);
         next unless $sc >= $parity;
+        next unless $mn > 1;                      # one child gives no resolution
         push @pairs, { s => $s, d => $d, n => $common, sp => $sp, dp => $dp,
                        score => $sc, smin => $scmin };
     }
@@ -708,3 +728,4 @@ sub utcof {
 warn sprintf("%d mv (%d dirs, %d files), %d rm, %d conflicts\n",
      scalar(@plan), scalar(grep { $_->{kind} eq 'd' } @plan),
      scalar(grep { $_->{kind} eq 'f' } @plan), scalar(@rm), scalar(@conflict));
+

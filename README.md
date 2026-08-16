@@ -302,15 +302,33 @@ A directory that gained or lost a file no longer matches by Merkle hash, even
 though it is clearly "the same folder" — a large video kept on the NAS but
 deleted from the phone, for instance.
 
-`--report-mvdir` scores candidate pairs by voting: every file matched between
-the two sides is one vote, and
+`--report-mvdir` scores candidate pairs by voting on their **direct children**:
+each child matched between the two sides is one vote, and
 
 ```
 score = matched / max(|S'|, |D'|)
 ```
 
-where `S'` and `D'` count only files that have a counterpart *somewhere* in the
-other tree — so a file that exists on one side only does not penalise the match.
+where `S'` and `D'` count only children that have a counterpart *somewhere* in
+the other tree — so content that exists on one side only does not penalise the
+match.
+
+Children are compared by **content hash**, which is the Merkle hash with names
+left out:
+
+```
+chash(file) = its sha1
+chash(dir)  = sha1("cont " + len + "\0" + concat(sorted(chash(direct children))))
+```
+
+So a folder whose files were *all* renamed is still recognised — renumbered
+camera exports, a date-prefixing app — which the Merkle hash cannot do, since
+names are part of it. The content hash is derived from the `.dts` on the fly:
+no format change, and existing inventories need no re-hashing.
+
+A pair is not considered at all when one path sits inside the other, when the
+destination path already exists as a source directory, or when a single child
+would decide the vote — one child scores 0 or 1, which no threshold can filter.
 
 ```
 [0.83] Camera  ->  2024/Vacances

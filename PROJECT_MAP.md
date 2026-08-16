@@ -53,7 +53,9 @@ byte-identical. Writes `FILE_new.dts` and `TmpDeleted.dts`.
 | `detect_root()`, `common_prefix()`, `rel()` | derive tree roots and relative paths |
 | `index_side()`, `index_dst()` | build the lookup tables; re-run once per round |
 | `plan_dirs_exact()`, `plan_files()` | the two historical planning passes |
-| `descend()`, `score_pair()`, `fuzzy_pairs()` | approximate match, `matched / max(\|S'\|,\|D'\|)` |
+| `chash()`, `child_index()` | content hash (names excluded) of every direct child |
+| `score_pair()`, `fuzzy_pairs()` | approximate match on direct children, `matched / max(\|S'\|,\|D'\|)` |
+| `related()` | refuse a pair where one path sits inside the other |
 | `apply_virtual()`, `rehash_dst()` | advance the destination state between rounds |
 | `schedule()` | mv ordering, cycles broken with a temporary name; once per round |
 | `walk()`, `utcof()` | projected `.dts` generation (`--new-dts`) |

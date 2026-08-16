@@ -129,5 +129,28 @@ for n in 1 2 3 4 5; do mk "$F/src/Android/clip$n.mp3" "n$n"; done
 mkdir -p "$F/dst.orig"
 for n in 1 2 3 4 5; do mk "$F/dst.orig/Android/media/clip$n.mp3" "n$n"; done
 
+#--- 10. single-child chain: the vote cannot resolve, and must not pretend to --
+# Every directory holds exactly one child, so matched/max is 0 or 1 and the 0.80
+# threshold filters nothing.  Names differ on both the file and the folders, so
+# no Merkle hash matches either: without `$mn > 1` the diagonal gets in and the
+# whole chain is claimed on the strength of a single child.
+F="$FIX/chain"
+mk "$F/src/Chain/A/B/one.txt" c1
+mkdir -p "$F/dst.orig"
+mk "$F/dst.orig/Chain/P/Q/two.txt" c1        # same content, every name differs
+
+#--- 11. the same chain with siblings: now the vote has something to say ------
+# Three children, all renamed.  Merkle cannot match (names are in the hash) but
+# the content hash can, which is the point of voting on chash: a folder whose
+# files were all renamed is still recognised.
+F="$FIX/chainsibs"
+mk "$F/src/Chain/A/B/one.txt"   s1
+mk "$F/src/Chain/A/B/two.txt"   s2
+mk "$F/src/Chain/A/B/three.txt" s3
+mkdir -p "$F/dst.orig"
+mk "$F/dst.orig/Chain/P/Q/xx.txt" s1
+mk "$F/dst.orig/Chain/P/Q/yy.txt" s2
+mk "$F/dst.orig/Chain/P/Q/zz.txt" s3
+
 echo "fixtures built in $FIX"
 ls "$FIX"
