@@ -12,12 +12,15 @@ build step. See `README.md` for usage.
 | `mutationstructure.pl` | CORE | diff of two `.dts` → `mv`/`rm` shell plan + projected `.dts` |
 | `README.md` | DOC | user-facing documentation |
 | `PROJECT_MAP.md` | DOC | this map |
+| `dts.priority.example` | DOC | documented sample of a `dts.pl` priority file |
 | `CLAUDE.md` | LOCAL | decisions, rationale, traps — git-ignored, not published |
 | `t/run-tests.sh`, `t/mkfixtures.sh`, `t/baseline/` | INFRA | test suite and reference plans |
+| `t_matching.pl` | INFRA | unit tests of the `dts.pl` expression parser and priority rules |
 | `LICENSE` | INFRA | MIT, Arnaud Bertrand |
 | `.gitignore` | INFRA | keeps `*.dts` and generated plans out of the repo |
 | `.claudeignore` | INFRA | keeps inventories out of agent context |
 | `*.dts`, `plan.sh`, `tmpuniq.*` | IGNORE | generated data, never committed |
+| `dts.priority` | IGNORE | per-directory rules, read by `dts.pl` if present |
 
 ## Data flow
 
@@ -34,12 +37,22 @@ any .dts ──dts.pl──> duplicate report / rm script / updated .dts
 | Sub | Purpose |
 |---|---|
 | `entries()` | sorted listing of one directory; used by **both** passes, so order is identical by construction |
-| `prescan()` | pre-pass for `--verbose` / `--extern`: walk without reading content |
+| `prescan()` | pre-pass for `--eta` / `--extern`: walk without reading content |
 | `visit()` | recursive walk; returns (type, raw digest, cumulative size) |
 | `flush_batch()` | one `sha1sum` exec per batch of 1000 files (`--extern`), matched **by path** |
 | `hash_file()`, `emit()`, `utc()` | local hashing and line formatting |
 | `stamp()` | mtime → columns 59-75; shared with `--update`'s staleness test |
 | `cached()` | `--update`: reuse the stored digest when size and mtime both match |
+
+`--verbose` alone prints progress and rates; totals and ETA need `--eta`, which
+pays for a second `lstat` walk (implied by `--extern`, which needs the list
+anyway). `--out FILE` avoids PowerShell's UTF-16 `>` redirection.
+
+Windows, Strawberry Perl only: a path over `MAX_PATH` is reported as `TOO LONG`
+rather than `ENOENT`, a name outside the active code page is hashed through its
+8.3 short name (the path column is then approximate), and both are counted and
+warned about at the end. `cached()` falls back to whole seconds when either side
+carries a `.000000` fraction, so a `.dts` survives the Cygwin/Strawberry split.
 
 `--update` reuses the ordinary walk with `cached()` plugged in, so a refreshed
 inventory cannot drift from a generated one; `--add-missing` makes the two
@@ -64,11 +77,35 @@ Planning is a loop: round 1 is the historical planner, then `--fuzzy-dirs`
 advances a virtual state and re-runs everything, so files an approximate folder
 carried along leave in the next round. Capped at 5 rounds.
 
-## `dts.pl` — shape
+## `dts.pl` — shape and entry points
 
-Single-pass filter over a `.dts`, one helper (`wanted()`). Global variables and a
-`while ($_ = $ARGV[0], /^-/)` option loop, deliberately preserved — it predates
-the other two tools by years. Do not modernise without being asked.
+Two-pass filter over a `.dts` (count keys, then emit), with `wanted()` deciding
+what enters the pass. Global variables and a `while ($_ = $ARGV[0], /^-/)` option
+loop, deliberately preserved — it predates the other two tools by years. Do not
+modernise without being asked. Long option names are matched **before** the loop,
+each with `next`, so `-keeppriority` is not swallowed by the `-keep` prefix.
+
+| Sub | Purpose |
+|---|---|
+| `wanted()` | is the line kept (type, `-szmin`) |
+| `mx_is_expr()` | bare string (basename regex) or expression? — backwards compatibility |
+| `mx_tokenize()` | string → tokens; free delimiters, paired `{} [] <>` nest |
+| `mx_or()`, `mx_and()`, `mx_not()` | recursive descent, `\|\|` < `&&` < `!` / `()` / term |
+| `mx_build()`, `mx_compile()` | tokens → closure; `mx_compile` also handles the bare form |
+| `mx_rules()` | split on commas → list of `[label, closure]` |
+| `matching()` | `1` if the expression matches, cached per expression string |
+| `load_priority_file()` | `dts.priority`: `[keeppriority]` / `[rmpriority]` sections |
+| `add_rules()`, `priority()` | build the ordered rule table; score a path, first match wins |
+
+Match expressions serve `-grep`, `-nogrep`, `-only`, `-notonly`, `-keep`,
+`-rmonly`, `-keeppriority` and `-rmpriority`: `f:/re/flags` on the basename,
+`p:/re/flags` on the whole path, `!`, `&&`, `||`, `()`.
+
+Priority scoring picks the survivor of each duplicate group for `-genrm`:
+command line `-keeppriority` (1000 down), then the file's `[keeppriority]`
+(800 down), then `-rmpriority` (-1000 up), then `[rmpriority]` (-800 up);
+default 0, highest score kept, `-rmonly` still protects an entry. `-showprio`
+annotates the output — for reading only, it breaks the column format.
 
 ## Invariants
 
@@ -86,3 +123,7 @@ the other two tools by years. Do not modernise without being asked.
 
 The work directory must stay outside OneDrive (file locks break `mv`); the
 default, `$TMPDIR/dts-tests`, already is.
+
+`perl t_matching.pl` — 57 unit tests, instant, no fixtures. It `eval`s the
+expression part of `dts.pl` between two cuts anchored on **code**, not on
+comment wording, and dies if the anchor disappears.
