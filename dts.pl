@@ -93,26 +93,26 @@ $DeletedFilename = "TmpDeleted.dts";
 $UpdatedFilename = "TmpUpdated.dts";
 $szmin = 0;
 $Type  = "f";
-$PrioFile = "dts.priority";        # lu s'il existe ; -nopriorityfile pour l'ignorer
+$PrioFile = "dts.priority";        # read if present ; -nopriorityfile ignores it
 
-#--- offsets du format a colonnes fixes ---------------------------------------
+#--- offsets of the fixed-column format ---------------------------------------
 $O_TYPE = 0;    $L_TYPE = 1;
 $O_SIZE = 2;    $L_SIZE = 14;
-$O_KEY  = 0;    $L_KEY  = 57;     # type + taille + sha1
+$O_KEY  = 0;    $L_KEY  = 57;     # type + size + sha1
 $O_PATH = 92;
 
 #==============================================================================
-#  Expressions de correspondance
+#  Match expressions
 #
 #  matching($fullpath, $expr) -> 1 / 0
 #
-#  Grammaire :   expr   := and ( '||' and )*
+#  Grammar :     expr   := and ( '||' and )*
 #                and    := not ( '&&' not )*
-#                not    := '!' not | '(' expr ')' | terme
-#                terme  := [f:|p:] <delim> regex <delim> [imsx]*
+#                not    := '!' not | '(' expr ')' | term
+#                term   := [f:|p:] <delim> regex <delim> [imsx]*
 #
-#  Une chaine qui ne commence pas par / ! ( f: p: est prise telle quelle
-#  comme regex sur le basename (compatibilite : -grep jpg).
+#  A string that does not start with / ! ( f: or p: is taken literally as a
+#  regex on the basename (backwards compatibility : -grep jpg).
 #==============================================================================
 
 %MXCACHE = ();
@@ -120,14 +120,14 @@ $O_PATH = 92;
 $MXP     = 0;
 $MXSRC   = '';
 
-sub mx_is_expr {                   # la chaine est-elle une expression ?
+sub mx_is_expr {                   # is the string an expression ?
   my ($s) = @_;
   return 0 unless defined $s;
   $s =~ s/^\s+//;
   return ($s =~ m{^[/!(]} || $s =~ /^[fp]:/) ? 1 : 0;
 }
 
-sub mx_tokenize {                  # chaine -> liste de jetons
+sub mx_tokenize {                  # string -> token list
   my ($s) = @_;
   my @t;
   my $n = length $s;
@@ -146,11 +146,11 @@ sub mx_tokenize {                  # chaine -> liste de jetons
     my $scope = 'f';
     if (substr($s, $i, 2) =~ /^([fp]):$/) { $scope = $1; $i += 2; }
 
-    die "dts: delimiteur de regex manquant dans '$s'\n" if $i >= $n;
+    die "dts: missing regex delimiter in '$s'\n" if $i >= $n;
     my $delim = substr($s, $i, 1);
-    die "dts: delimiteur de regex invalide ('$delim') dans '$s'\n"
+    die "dts: invalid regex delimiter ('$delim') in '$s'\n"
         if $delim =~ /[\w\s]/ || $delim eq '(' || $delim eq ')';
-    #  delimiteurs apparies : { } [ ] < >  (imbrication comptee, comme en Perl)
+    #  paired delimiters : { } [ ] < >  (nesting counted, as in Perl)
     my %PAIR  = ('{' => '}', '[' => ']', '<' => '>');
     my $close = $PAIR{$delim};
     my $open  = defined $close ? $delim : '';
@@ -169,7 +169,7 @@ sub mx_tokenize {                  # chaine -> liste de jetons
       }
       $pat .= $ch; $i++;
     }
-    die "dts: regex non terminee (delimiteur '$delim') dans '$s'\n" unless $closed;
+    die "dts: unterminated regex (delimiter '$delim') in '$s'\n" unless $closed;
     my $flags = '';
     while ($i < $n && substr($s, $i, 1) =~ /[imsx]/) { $flags .= substr($s, $i, 1); $i++; }
     push @t, {k=>'RE', scope=>$scope, pat=>$pat, flags=>$flags, off=>$off, end=>$i};
@@ -206,7 +206,7 @@ sub mx_not {
   if (mx_peek() eq 'LP') {
     $MXP++;
     my $e = mx_or();
-    die "dts: parenthese fermante manquante dans '$MXSRC'\n" unless mx_peek() eq 'RP';
+    die "dts: missing closing parenthesis in '$MXSRC'\n" unless mx_peek() eq 'RP';
     $MXP++;
     return $e;
   }
@@ -216,43 +216,43 @@ sub mx_not {
     my $qr = $flags ne '' ? eval { qr/(?$flags:$pat)/ } : eval { qr/$pat/ };
     unless (defined $qr) {
       my $err = $@; $err =~ s/ at .* line \d+\.?\n?$//; chomp $err;
-      die "dts: regex invalide /$pat/$flags dans '$MXSRC' : $err\n";
+      die "dts: invalid regex /$pat/$flags in '$MXSRC' : $err\n";
     }
     return $t->{scope} eq 'p' ? sub { $_[1] =~ $qr ? 1 : 0 }
                               : sub { $_[0] =~ $qr ? 1 : 0 };
   }
-  die "dts: expression incomplete ou invalide : '$MXSRC'\n";
+  die "dts: incomplete or invalid expression : '$MXSRC'\n";
 }
 
-sub mx_build {                     # liste de jetons -> code ref
+sub mx_build {                     # token list -> code ref
   my ($tokens, $src) = @_;
   local @MXT   = @$tokens;
   local $MXP   = 0;
   local $MXSRC = $src;
-  die "dts: expression vide dans '$src'\n" unless @MXT;
+  die "dts: empty expression in '$src'\n" unless @MXT;
   my $c = mx_or();
-  die "dts: texte inattendu apres l'expression dans '$src'\n" if $MXP < @MXT;
+  die "dts: unexpected text after the expression in '$src'\n" if $MXP < @MXT;
   return $c;
 }
 
-sub mx_compile {                   # chaine -> code ref
+sub mx_compile {                   # string -> code ref
   my ($s) = @_;
   unless (mx_is_expr($s)) {
     my $qr = eval { qr/$s/ };
     unless (defined $qr) {
       my $err = $@; $err =~ s/ at .* line \d+\.?\n?$//; chomp $err;
-      die "dts: regex invalide '$s' : $err\n";
+      die "dts: invalid regex '$s' : $err\n";
     }
     return sub { $_[0] =~ $qr ? 1 : 0 };
   }
   my @t = mx_tokenize($s);
-  die "dts: virgule interdite ici : '$s'\n" if grep { $_->{k} eq 'COMMA' } @t;
+  die "dts: comma not allowed here : '$s'\n" if grep { $_->{k} eq 'COMMA' } @t;
   return mx_build(\@t, $s);
 }
 
-sub mx_rules {                     # chaine -> liste de [libelle, code ref]
+sub mx_rules {                     # string -> list of [label, code ref]
   my ($s) = @_;
-  die "dts: expression manquante\n" unless defined $s;
+  die "dts: missing expression\n" unless defined $s;
   return ([$s, mx_compile($s)]) unless mx_is_expr($s);
   my @t = mx_tokenize($s);
   my @groups;
@@ -264,14 +264,14 @@ sub mx_rules {                     # chaine -> liste de [libelle, code ref]
   push @groups, [@cur];
   my @out;
   for my $g (@groups) {
-    die "dts: regle vide dans '$s'\n" unless @$g;
+    die "dts: empty rule in '$s'\n" unless @$g;
     my $lab = substr($s, $g->[0]{off}, $g->[-1]{end} - $g->[0]{off});
     push @out, [$lab, mx_build($g, $lab)];
   }
   return @out;
 }
 
-sub matching {                     # 1 si $expr correspond a $fullpath
+sub matching {                     # 1 if $expr matches $fullpath
   my ($fullpath, $expr) = @_;
   return 1 unless defined $expr && length $expr;
   my $c = $MXCACHE{$expr};
@@ -281,8 +281,8 @@ sub matching {                     # 1 si $expr correspond a $fullpath
   return $c->($base, $fullpath);
 }
 
-sub priority {                     # score de $fullpath : 1000..  0  ..-1000
-  my ($fullpath) = @_;                 # positionne aussi $PrioLabel
+sub priority {                     # score of $fullpath : 1000..  0  ..-1000
+  my ($fullpath) = @_;                 # also sets $PrioLabel
   my $base = $fullpath;
   $base =~ s{^.*/}{}s;
   for my $r (@Rules) {
@@ -292,9 +292,9 @@ sub priority {                     # score de $fullpath : 1000..  0  ..-1000
   return 0;
 }
 
-#--- fichier de priorites -----------------------------------------------------
-#  [keeppriority]        une expression par ligne, dans l'ordre decroissant
-#  expr                  # lignes vides et lignes commencant par # ignorees
+#--- priority file ------------------------------------------------------------
+#  [keeppriority]        one expression per line, most important first
+#  expr                  # blank lines and lines starting with # are ignored
 #  [rmpriority]
 #  expr
 #------------------------------------------------------------------------------
@@ -302,7 +302,7 @@ sub load_priority_file {
   my ($file, $explicit) = @_;
   unless (open(PF, "< $file")) {
     die "dts: -priorityfile $file : $!\n" if $explicit;
-    return 0;                        # fichier par defaut absent : silence
+    return 0;                        # default file absent : stay silent
   }
   my $sec = '';
   my $n   = 0;
@@ -312,14 +312,14 @@ sub load_priority_file {
     if (/^\s*\[\s*([A-Za-z]+)\s*\]\s*$/) {
       my $s = lc $1;
       $s =~ s/priority$//;
-      die "dts: $file ligne $.: section inconnue [$1]\n" unless $s eq 'keep' || $s eq 'rm';
+      die "dts: $file line $.: unknown section [$1]\n" unless $s eq 'keep' || $s eq 'rm';
       $sec = $s;
       next;
     }
     s/^\s+//; s/\s+$//;
-    die "dts: $file ligne $.: regle en dehors de toute section\n" unless $sec;
+    die "dts: $file line $.: rule outside of any section\n" unless $sec;
     my @r = eval { mx_rules($_) };
-    if ($@) { my $e = $@; $e =~ s/^dts: //; die "dts: $file ligne $.: $e"; }
+    if ($@) { my $e = $@; $e =~ s/^dts: //; die "dts: $file line $.: $e"; }
     if ($sec eq 'keep') { push @KeepFile, @r; } else { push @RmFile, @r; }
     $n += scalar @r;
   }
@@ -328,21 +328,21 @@ sub load_priority_file {
 }
 
 #==============================================================================
-#  Analyse des options
+#  Option parsing
 #==============================================================================
 $nblev = 1;
 while (defined($_ = $ARGV[0]) && /^-|^\d+$/) {
   shift;
   last if /^--$/;
 
-  # options a nom long : testees en premier, avec next, pour ne pas etre
-  # capturees par les prefixes plus courts (-keep, -rmonly...)
+  # long option names : tested first, with next, so that they are not
+  # captured by the shorter prefixes (-keep, -rmonly...)
   if (/^-keeppri/)        { push @KeepPrio, mx_rules(shift @ARGV); next; }
   if (/^-rmpri/)          { push @RmPrio,   mx_rules(shift @ARGV); next; }
   if (/^-showprio/)       { $IndShowPrio = 1; next; }
   if (/^-nopriorityfile/) { $PrioFile = ''; $PrioFileGiven = 0; next; }
   if (/^-priorityfile/)   { $PrioFile = shift @ARGV; $PrioFileGiven = 1;
-                            die "dts: -priorityfile : nom de fichier manquant\n"
+                            die "dts: -priorityfile : missing file name\n"
                                 unless defined $PrioFile && length $PrioFile;
                             next; }
 
@@ -377,23 +377,23 @@ while (defined($_ = $ARGV[0]) && /^-|^\d+$/) {
   };
 };
 
-# -keep combine aux priorites devient la derniere regle "keep" de la ligne de commande
+# -keep combined with priorities becomes the last command line "keep" rule
 if ((@KeepPrio || @RmPrio) && $IndKeep) {
   push @KeepPrio, [$GrepString, mx_compile($GrepString)];
 }
 
 if (length($PrioFile) && !$IndUpdate) {
   $nprio = load_priority_file($PrioFile, $PrioFileGiven);
-  print STDERR "dts: $PrioFile : $nprio regle(s) de priorite\n" if $nprio;
+  print STDERR "dts: $PrioFile : $nprio priority rule(s)\n" if $nprio;
 }
 
-die "dts: trop de regles de priorite en ligne de commande (max 200 par sens)\n"
+die "dts: too many command line priority rules (max 200 per direction)\n"
     if @KeepPrio > 200 || @RmPrio > 200;
-die "dts: trop de regles de priorite dans $PrioFile (max 800 par section)\n"
+die "dts: too many priority rules in $PrioFile (max 800 per section)\n"
     if @KeepFile > 800 || @RmFile > 800;
 
-#  Table unique, dans l'ordre de parcours : la premiere regle qui correspond
-#  fixe le score.  Ligne de commande avant fichier, "keep" avant "rm".
+#  Single table, in the order it is scanned : the first rule that matches
+#  fixes the score.  Command line before file, "keep" before "rm".
 sub add_rules {
   my ($list, $base, $step) = @_;
   for (my $i = 0; $i <= $#$list; $i++) {
@@ -408,7 +408,7 @@ $IndPrio = @Rules ? 1 : 0;
 
 $TypeRe = ($Type eq "a") ? qr/./ : qr/[\Q$Type\E]/;
 
-sub wanted {                       # ligne retenue ?
+sub wanted {                       # is the line kept ?
   my ($l) = @_;
   return 0 unless length($l) > $O_PATH;
   return 0 unless substr($l, $O_TYPE, $L_TYPE) =~ /^$TypeRe$/;
@@ -488,7 +488,7 @@ while (<FILE>) {
           if ($IndPrio == 1) {
             $keepit = 0;
             if ($nbk && $prio == $bestprio{$clef}) { $keepit = 1; $nbk = 0; }
-            # une entree protegee par -rmonly n'est jamais effacee
+            # an entry protected by -rmonly is never removed
             $keepit = 1 if !$keepit && $IndGenRmOnly == 1
                            && !matching($allrest, $GrepString);
             print STDOUT ($keepit ? "#rm " : "rm ") . $allrest . $suffix . "\n";
