@@ -1,0 +1,22 @@
+#-----------------------------------------------------------------------------
+# dts.priority - permanent priority rules, read by dts.pl in the current
+#                directory (unless -nopriorityfile / -priorityfile F)
+#
+# One expression per line, most important first.
+#   f:/re/flags  basename            p:/re/flags  whole path
+#   /re/         == f:/re/           operators  !  &&  ||  ( )
+# Scores : [keeppriority] 800, 799 ...   [rmpriority] -800, -799 ...
+# The command line options -keeppriority / -rmpriority outrank the file
+# (1000 ... and -1000 ...).
+#-----------------------------------------------------------------------------
+
+[keeppriority]
+p:|/important/|i
+p:|/photos/20\d\d/|
+f:/^IMG_/ || f:/^DSC_/
+
+[rmpriority]
+f:/^tmp|tmp$/
+f:/\.bak$/
+f:/ - copie\b/i || f:/ \(\d+\)\./
+p:{/(Corbeille|Downloads|Telechargements)/}
