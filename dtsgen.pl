@@ -12,13 +12,20 @@
 #   --max-size MB     ignore files larger than this
 #   --extern          delegate hashing to sha1sum, in batches
 #   --batch N         batch size and progress step (default 1000)
-#   --verbose         pre-pass, progress, throughput and ETA
+#   --verbose         progress and throughput on stderr
+#   --eta             extra pre-pass to know the totals up front, so progress
+#                     can show x/total and a time remaining.  Costs a second
+#                     lstat walk of the whole tree; on Windows/MSYS2, where
+#                     lstat is expensive, that can double the total runtime.
+#                     Implied by --extern, which needs the file list anyway.
 #   --check F.dts     verify presence/type/size without hashing; exit 1 on drift
 #   --update F.dts    refresh an inventory: roots come from the .dts, entries
 #                     whose size AND mtime still match keep their digest, the
 #                     others are re-hashed, vanished ones are dropped.
 #                     Writes F_new.dts and TmpDeleted.dts (the dropped lines).
 #   --add-missing     with --update, also inventory files the .dts never had
+#   --out FILE        write the inventory to FILE instead of stdout.  Use this
+#                     under PowerShell, whose ">" redirection writes UTF-16.
 #   --help  --version
 use strict;
 use warnings;
@@ -36,6 +43,10 @@ my $extern  = 0;
 my $batchsz = 1000;
 my $verbose = 0;
 my $check;
+my $outfile;                # write here instead of stdout: PowerShell's ">"
+                            # redirection writes UTF-16 by default, which would
+                            # corrupt the .dts
+my $wanteta = 0;            # pre-pass just to know the total (costs a full walk)
 my $update;                 # .dts to refresh
 my $addmissing = 0;         # also pick up files that are not in it yet
 
@@ -54,6 +65,7 @@ GetOptions('exclude=s' => \@excl,   'xdev'    => \$xdev,
            'batch=i'   => \$batchsz,'verbose' => \$verbose,
            'check=s'   => \$check,
            'update=s'  => \$update,  'add-missing' => \$addmissing,
+           'eta'       => \$wanteta,  'out=s'   => \$outfile,
            'help'      => sub { usage() },
            'version'   => sub { print "dtsgen.pl $VERSION\n"; exit 0 })
     or die "invalid option (--help)\n";
@@ -61,13 +73,20 @@ die "--add-missing only makes sense with --update\n" if $addmissing && !$update;
 my $skip = @excl ? do { my $r = join '|', @excl; qr/$r/ } : undef;
 my $maxb = $maxmb * 1048576;
 
+if (defined $outfile) {
+    open my $out, '>', $outfile or die "$outfile: $!\n";
+    select $out;
+}
 binmode STDOUT, ':raw';
 binmode STDERR, ':raw';
+binmode select(), ':raw';
 $| = 1;                     # unbuffered: an interrupt never loses a line
 
 my $ZERO = pack('H*', '0' x 40);
 my ($nfile, $ndir, $nskip, $nerr, $next, $nbatch) = (0, 0, 0, 0, 0, 0);
 my ($nkept, $nrehash, $nnew, $ngone) = (0, 0, 0, 0);   # --update accounting
+my $nmangled = 0;           # opened via 8.3 short name; path column is lossy
+my $nlong    = 0;           # over the Windows MAX_PATH limit
 my $vol = 0;
 
 my (@files, %pos, %ext);    # pre-pass: file order; digests from sha1sum
@@ -75,6 +94,7 @@ my $flushed  = 0;           # index of the first not-yet-hashed file
 my $totfile  = 0;           # total file count (empty ones included)
 my $totbytes = 0;           # total bytes to read
 my $t0;                     # start of phase 2
+my ($lastt, $lastv, $lastn) = (0, 0, 0);   # previous progress line, for rates
 
 sub hms {
     my $s = int($_[0] + 0.5);
@@ -132,7 +152,19 @@ sub entries {
         # path the .dts never knew about is not inventoried now
         if ($update && !$addmissing && !$old{$p}) { $nnew++ if $count; next }
         my @s = lstat $p;
-        unless (@s) { warn "lstat: $p: $!\n"; $nerr++ if $count; next }
+        unless (@s) {
+            # Windows ANSI APIs stop at MAX_PATH (260 incl. the NUL).  Cygwin
+            # uses the wide APIs and does not; hence this only bites under
+            # Strawberry Perl, and the message would otherwise be a puzzling
+            # "No such file or directory" on a file that plainly exists.
+            if ($^O eq 'MSWin32' && length($p) >= 250) {
+                warn "TOO LONG (" . length($p) . " chars, Windows limit 259): $p\n";
+                $nlong++ if $count;
+            }
+            else { warn "lstat: $p: $!\n" }
+            $nerr++ if $count;
+            next;
+        }
         my $t = -l _ ? 'l' : -d _ ? 'd' : -f _ ? 'f' : 's';
         if ($t eq 'f' && $maxb && $s[7] > $maxb) { $nskip++ if $count; next }
         push @ent, [$n, $p, $t, \@s];
@@ -149,7 +181,7 @@ sub prescan {
         # inflate the total the ETA is computed from
         return if defined cached($path, $st->[7], $st->[9]);
         $totbytes += $st->[7];
-        push @files, $path if $st->[7] > 0;
+        push @files, $path if $extern && $st->[7] > 0;
         if ($verbose && $totfile % 10000 == 0) {
             printf STDERR "  scan... %d files, %s | %s\n", $totfile, go($totbytes), $path;
         }
@@ -196,7 +228,21 @@ sub cached {
     my $o = $old{$path} or return undef;
     return undef unless $o->{type} eq 'f';
     return undef unless $o->{size} == $size;
-    return undef unless $o->{stamp} eq (stamp($mtime))[0];
+    # Cygwin reads the NTFS FILETIME and reports microseconds; the Microsoft
+    # CRT, which Strawberry Perl uses, returns a time_t and reports .000000.
+    # So: compare the full stamp when both sides carry a fraction, and fall
+    # back to whole seconds only when one of them has none.  A sub-second
+    # rewrite is still caught whenever the information is available on both
+    # sides, and a .dts stays usable across the two perls.
+    my ($stamp, $sec) = stamp($mtime);
+    my $of = substr($o->{stamp}, 11, 6);
+    my $nf = substr($stamp,      11, 6);
+    if ($of eq '000000' || $nf eq '000000') {
+        return undef unless int($o->{stamp}) == $sec;
+    }
+    else {
+        return undef unless $o->{stamp} eq $stamp;
+    }
     return pack 'H*', $o->{hash};
 }
 
@@ -208,7 +254,20 @@ sub hash_file {
         my $raw = delete $ext{$path};
         if (defined $raw) { $next++; return $raw }
     }
-    return eval { Digest::SHA->new(1)->addfile($path, 'b')->digest };
+    my $raw = eval { Digest::SHA->new(1)->addfile($path, 'b')->digest };
+    return $raw if defined $raw;
+    # Windows, ANSI Perl (Strawberry): a name holding a character outside the
+    # active code page comes back from readdir with a replacement char and can
+    # no longer be opened.  The 8.3 short name is pure ASCII and still works.
+    # NOTE: the path column then holds the mangled long name -- see $nmangled.
+    if ($^O eq 'MSWin32') {
+        my $short = eval { require Win32; Win32::GetShortPathName($path) };
+        if (defined $short && length $short && $short ne $path) {
+            $raw = eval { Digest::SHA->new(1)->addfile($short, 'b')->digest };
+            if (defined $raw) { $nmangled++; return $raw }
+        }
+    }
+    return undef;
 }
 
 # returns (type, raw digest, cumulative size); empty list if skipped/failed
@@ -250,15 +309,33 @@ sub visit {
         $nfile++;
         $vol += $size if $read;             # only what was actually read
         if ($verbose && $nfile % $batchsz == 0) {
-            my $el  = time() - $t0;
+            my $now = time();
+            # instantaneous rates, measured since the previous line: a cumulative
+            # average hides a collapse, and files/s is the meaningful figure when
+            # the tree is full of small files
+            my $el = $now - $t0;
+            # cumulative average tells you where the run stands overall;
+            # the last-burst figure tells you what it is doing right now.
+            # On a tree of small files, files/s is the meaningful number.
+            my $avg = '';
+            $avg = sprintf ", avg %.0f MB/s %.0f f/s",
+                   $vol / $el / 1048576, $nfile / $el          if $el > 0.5;
+            my $dt   = $now - $lastt;
+            my $inst = '';
+            $inst = sprintf " | now %.0f MB/s %.0f f/s",
+                    ($vol - $lastv) / $dt / 1048576, ($nfile - $lastn) / $dt
+                if $dt > 0.05;
+            ($lastt, $lastv, $lastn) = ($now, $vol, $nfile);
             my $eta = '';
-            if ($el > 1 && $vol > 0 && $totbytes > $vol) {
-                my $rate = $vol / $el;
-                $eta = sprintf ", %.0f MB/s, ETA %s",
-                       $rate / 1048576, hms(($totbytes - $vol) / $rate);
+            $eta = sprintf ", ETA %s", hms(($totbytes - $vol) / ($vol / $el))
+                if $el > 1 && $vol > 0 && $totbytes > $vol;
+            if ($totfile) {
+                printf STDERR "  ... %d/%d files, %s/%s%s%s%s\n",
+                       $nfile, $totfile, go($vol), go($totbytes), $avg, $eta, $inst;
+            } else {
+                printf STDERR "  ... %d files, %s%s%s%s\n",
+                       $nfile, go($vol), $avg, $eta, $inst;
             }
-            printf STDERR "  ... %d/%d files, %s/%s%s\n",
-                   $nfile, $totfile, go($vol), go($totbytes), $eta;
         }
         return ('f', $raw, $size);
     }
@@ -334,18 +411,20 @@ for my $r (@roots) {
     push @start, [$r, (-d _ ? 'd' : -f _ ? 'f' : 's'), \@s];
 }
 
-if ($extern || $verbose) {
+if ($extern || $wanteta) {
     warn "dtsgen $VERSION - phase 1: taking inventory...\n" if $verbose;
     my $ts = time();
     prescan(@$_[0, 1, 2], $_->[2][0]) for @start;
-    $pos{ $files[$_] } = $_ for 0 .. $#files;
+    # %pos is only needed to drive the sha1sum batches; on 3M files it costs
+    # ~500 MB and 8 s, so it is not built when --extern is off
+    $pos{ $files[$_] } = $_ for $extern ? (0 .. $#files) : ();
     warn sprintf("phase 1 done in %s: %d files, %s to read\n",
                  hms(time() - $ts), $totfile, go($totbytes)) if $verbose;
     ($nskip, $nerr) = (0, 0);           # counted for real during the emit pass
 }
 
 warn "phase 2: hashing...\n" if $verbose;
-$t0 = time();
+$t0 = $lastt = time();
 
 my $outfh;
 if (defined $update) {                  # emit() writes to the selected handle
@@ -371,6 +450,14 @@ if (defined $update) {
 }
 
 warn sprintf("done in %s, %s\n", hms(time() - $t0), go($vol)) if $verbose;
+warn "WARNING: $nlong path(s) exceed the Windows MAX_PATH limit and are MISSING\n"
+   . "         from this inventory.  Cygwin perl (MSYS2) handles them; Strawberry\n"
+   . "         does not.  Workaround without admin rights:\n"
+   . "           subst X: \"J:\\deep\\prefix\"   then inventory X:/\n" if $nlong;
+warn "WARNING: $nmangled path(s) could not be represented in the ANSI code page.\n"
+   . "         They were hashed through their 8.3 short name, but the path\n"
+   . "         column is approximate: this .dts will not compare cleanly with\n"
+   . "         one produced on Linux, MSYS2 or Android.\n" if $nmangled;
 warn "$nfile files", ($extern ? " ($next via sha1sum, $nbatch batches)" : ""),
      ", $ndir dirs, $nskip skipped, $nerr errors\n";
 if (defined $update) {
