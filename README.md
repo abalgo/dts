@@ -75,7 +75,13 @@ cd dts && chmod +x *.pl
 Requires Perl 5.10+ with `Digest::SHA`, `Time::HiRes` and `Getopt::Long` — all
 core since 2007. `--extern` additionally needs `sha1sum` (GNU coreutils).
 
-Tested on Linux, Termux (Android) and MSYS2 / Git Bash on Windows.
+Tested on Linux, Termux (Android), MSYS2 / Git Bash and Strawberry Perl on
+Windows.
+
+On Windows, prefer MSYS2: its Perl is a Cygwin build that uses the wide Win32
+APIs, so long paths and non-ANSI names simply work. Strawberry Perl is faster
+but hits both limits — see *Known limitations*. Under PowerShell, always write
+the inventory with `--out`, never with `>`.
 
 On Termux: `pkg install perl` then `termux-fix-shebang *.pl`, or just call
 `perl dtsgen.pl ...`.
@@ -104,7 +110,7 @@ On Termux: `pkg install perl` then `termux-fix-shebang *.pl`, or just call
 
 ```
 dtsgen.pl [--xdev] [--exclude REGEX]... [--max-size Mo]
-          [--extern] [--batch N] [--verbose] ROOT...
+          [--extern] [--batch N] [--verbose] [--eta] [--out FILE] ROOT...
 dtsgen.pl --check FILE.dts
 dtsgen.pl --update FILE.dts [--add-missing]
 ```
@@ -116,10 +122,20 @@ dtsgen.pl --update FILE.dts [--add-missing]
 | `--max-size Mo` | ignore files larger than this |
 | `--extern` | delegate hashing to `sha1sum`, in batches |
 | `--batch N` | batch size and progress step (default 1000) |
-| `--verbose` | pre-pass, progress, throughput, ETA |
+| `--verbose` | progress and throughput on stderr |
+| `--eta` | extra pre-pass for the totals, so progress can show `x/total` and a time remaining |
+| `--out FILE` | write the inventory to a file instead of stdout |
 | `--check F.dts` | verify presence, type and size — no hashing; exit 1 on drift |
 | `--update F.dts` | refresh an inventory in place of re-hashing everything |
 | `--add-missing` | with `--update`, also take in files the `.dts` never had |
+
+`--eta` is not free: knowing the totals up front means walking the whole tree a
+second time with `lstat`. On Windows and MSYS2, where `lstat` is expensive, that
+can double the total runtime. `--extern` implies it, since it needs the file
+list anyway.
+
+Use `--out` under PowerShell: its `>` redirection writes UTF-16 and would
+corrupt the `.dts`.
 
 Symlinks are hashed on their target string and **never followed** — except a
 root you name explicitly on the command line, which is followed.
@@ -199,9 +215,15 @@ dts.pl [-eq | -neq | -gt | -lt] [n] [options] FILE.dts...
 | `-gt n` / `-lt n` / `-eq n` / `-neq n` | entries appearing more/fewer/exactly/not n times |
 | `-type f\|d\|l\|s\|a` | entry type to consider (default `f`; `-type d` finds duplicate trees) |
 | `-szmin N` | ignore entries smaller than N bytes |
-| `-grep S` / `-nogrep S` / `-only S` / `-notonly S` | filter groups by path pattern |
+| `-grep E` / `-nogrep E` / `-only E` / `-notonly E` | filter groups by match expression |
 | `-genrm` | emit an `rm` script, first occurrence of each group commented out |
-| `-keep S` | keep the copy matching S |
+| `-keep E` | keep the copy matching E |
+| `-rmonly E` | emit an `rm` script, but uncomment only what matches E |
+| `-keeppriority E[,E...]` | rules choosing which copy survives (repeatable) |
+| `-rmpriority E[,E...]` | rules choosing which copy goes first (repeatable) |
+| `-priorityfile F` | rules read from a file (default `./dts.priority`) |
+| `-nopriorityfile` | ignore `./dts.priority` |
+| `-showprio` | annotate the output with the computed score |
 | `-bl` | blank line between groups |
 | `-update` | split a `.dts` into still-present and vanished entries |
 
@@ -211,6 +233,80 @@ Two traps worth knowing before running `-genrm`:
   `4b825dc6…`. Always pass `-szmin 1`.
 - Git object stores are already content-addressed and the same blob legitimately
   appears in several repositories. Exclude `.git` at inventory time.
+
+### Match expressions
+
+Everywhere an expression is expected — `-grep`, `-nogrep`, `-only`, `-notonly`,
+`-keep`, `-rmonly`, `-keeppriority`, `-rmpriority` — you can write more than a
+bare pattern:
+
+| Form | Meaning |
+|---|---|
+| `f:/re/flags` | regex on the **basename** |
+| `p:/re/flags` | regex on the **whole path** |
+| `/re/flags` | same as `f:/re/flags` |
+| `!` `&&` `\|\|` `( )` | negation, conjunction, disjunction, grouping |
+| flags | `i` `m` `s` `x`, as in Perl |
+
+Any non-alphanumeric character may serve as the delimiter, except `(` and `)`,
+which are reserved for grouping — handy when the pattern itself contains
+slashes: `p:|/tmp/|`, `f:#\.jpg$#`. The paired delimiters `{}`, `[]` and `<>`
+nest, so `p:{/(a|b)/}` needs no escaping.
+
+A string that does not start with `/`, `!`, `(`, `f:` or `p:` is taken literally
+as a regex on the basename, so `-grep jpg` keeps working exactly as before.
+
+```sh
+./dts.pl -gt 1 -szmin 1 -grep '/\.jpg$/ && f:/^20/ && !p:/mk_/' pictures.dts
+```
+
+### Choosing which copy survives
+
+With `-genrm`, the first entry of each group is the one kept. Priority rules let
+you decide instead: every entry is scored, and in each group of duplicates the
+**highest score survives** while the others are removed.
+
+```sh
+./dts.pl -gt 1 -szmin 1 -genrm \
+    -keeppriority 'p:|/NAS/photos/|,f:/^IMG_/' \
+    -rmpriority   'f:/ - copie\b/i,p:{/(Downloads|Corbeille)/}' pictures.dts
+```
+
+Rules are tried in order and the first one that matches fixes the score;
+anything unmatched scores 0. Rules given earlier therefore win:
+
+| Source | Scores |
+|---|---|
+| `-keeppriority` | 1000, 999, 998 … |
+| `-keep` | after the `-keeppriority` rules |
+| `[keeppriority]` in the file | 800, 799 … |
+| nothing matched | 0 |
+| `[rmpriority]` in the file | −800, −799 … |
+| `-rmpriority` | −1000, −999 … |
+
+The command line always outranks the file. An entry protected by `-rmonly` is
+never removed, whatever its score.
+
+Rules you reuse belong in a **priority file** — `./dts.priority` by default,
+read if it exists, skipped silently otherwise:
+
+```
+[keeppriority]
+p:|/important/|i
+f:/^IMG_/ || f:/^DSC_/
+
+[rmpriority]
+f:/ - copie\b/i || f:/ \(\d+\)\./
+p:{/(Corbeille|Downloads)/}
+```
+
+One expression per line, most important first; blank lines and `#` comments are
+ignored. `-priorityfile F` reads another file (and fails if it is missing),
+`-nopriorityfile` ignores the default one. See `dts.priority.example`.
+
+`-showprio` shows the score and the rule that produced it on each line, so you
+can check a rule set before running the script. It is meant to be **read**, not
+executed nor fed back to `dts.pl`: it breaks the column format.
 
 ---
 
@@ -390,8 +486,25 @@ in the next, once its stray files have left.
   inventory time.
 - **OneDrive placeholders** cannot be reliably identified from Perl; opening one
   triggers a download. Use `--exclude`.
-- `--extern` and `--verbose` keep the ordered file list in memory: a few MB for
-  100k files, around 100 MB for several million.
+- `--extern` keeps the ordered file list in memory: a few MB for 100k files,
+  around 500 MB for several million. `--eta` counts and measures without
+  keeping the list.
+- **Windows, Strawberry Perl only** — both limits come from the ANSI Win32 APIs
+  it is built against, and neither exists under MSYS2:
+  - a path of 260 characters or more cannot be opened. Such entries are
+    reported as `TOO LONG`, counted, and **missing from the inventory**; a final
+    warning says so. Without admin rights, `subst X: "J:\deep\prefix"` and
+    inventory `X:/` instead.
+  - a name holding a character outside the active code page cannot be opened
+    either. The file is hashed through its 8.3 short name so its content is
+    still signed, but the path column is approximate — such a `.dts` will not
+    compare cleanly with one produced on Linux, MSYS2 or Android. Counted and
+    warned about at the end.
+- **Mixing Cygwin and Strawberry inventories**: Cygwin reads the NTFS timestamp
+  and reports microseconds, the Microsoft CRT reports `.000000`. `--update`
+  compares whole seconds whenever either side lacks the fraction, so a `.dts`
+  stays usable across both — at the cost of not detecting a sub-second rewrite
+  in that case.
 
 ---
 
