@@ -228,5 +228,25 @@ else ok  "--add-missing without --update is refused"
 fi
 
 echo
+echo "8. dts.pl match expressions and priority rules"
+# t_matching.pl evaluates the expression part of dts.pl and counts its own
+# assertions; it is run from a scratch directory because it writes a temporary
+# priority file in the current one.  Its totals are folded into ours.
+UT="$WORK/unit"
+rm -rf "$UT"; mkdir -p "$UT"
+if ( cd "$UT" && perl "$REPO/t_matching.pl" ) > "$UT/out.txt" 2>&1
+then
+    n=$(sed -n 's/^\([0-9][0-9]*\) tests OK.*/\1/p' "$UT/out.txt")
+    pass=$((pass + ${n:-0}))
+    printf '  ok    t_matching.pl: %s assertions\n' "${n:-0}"
+else
+    k=$(grep -c '^KO ' "$UT/out.txt" || true)
+    [ "$k" -gt 0 ] || k=1
+    fail=$((fail + k))
+    printf '  FAIL  t_matching.pl: %d assertion(s)\n' "$k"
+    head -20 "$UT/out.txt"
+fi
+
+echo
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

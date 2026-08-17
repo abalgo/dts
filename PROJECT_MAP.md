@@ -117,7 +117,7 @@ annotates the output — for reading only, it breaks the column format.
 
 ## Testing
 
-`sh t/run-tests.sh` — 11 fixtures, 93 assertions. Each fixture's plan is
+`sh t/run-tests.sh` — 11 fixtures, 150 assertions. Each fixture's plan is
 **executed for real**, then re-inventoried and diffed against `--new-dts`.
 `t/baseline/` holds the committed reference plans of the default mode.
 
@@ -126,4 +126,6 @@ default, `$TMPDIR/dts-tests`, already is.
 
 `perl t_matching.pl` — 57 unit tests, instant, no fixtures. It `eval`s the
 expression part of `dts.pl` between two cuts anchored on **code**, not on
-comment wording, and dies if the anchor disappears.
+comment wording, and dies if the anchor disappears. `dts.pl` is looked up next
+to the script, so it runs from anywhere; section 8 of `t/run-tests.sh` runs it
+in a scratch directory and folds its totals in.

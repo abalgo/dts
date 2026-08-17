@@ -2,7 +2,10 @@
 # unit tests for matching() : eval the "expressions" part of dts.pl
 # The two cuts are anchored on code, not on comment wording, so rewording a
 # banner cannot silently leak the option loop into the eval.
-open(S, "< dts.pl") or die;
+# dts.pl is looked up next to this script, so the tests can run from any
+# directory; the scratch priority file is written in the current one.
+my $dts = $0; $dts =~ s{[^/\\]+$}{}; $dts .= "dts.pl";
+open(S, "< $dts") or die "$dts: $!\n";
 my $src = do { local $/; <S> };
 close S;
 $src =~ s/.*?^\%MXCACHE = \(\);/\%MXCACHE = ();/ms;
