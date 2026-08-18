@@ -45,7 +45,7 @@ any .dts ──dts.pl──> duplicate report / rm script / updated .dts
 | `visit()` | recursive walk; returns (type, raw digest, cumulative size) |
 | `flush_batch()` | one `sha1sum` exec per batch of 1000 files (`--extern`), matched **by path** |
 | `hash_file()`, `emit()`, `utc()` | local hashing and line formatting |
-| `stamp()` | mtime → columns 59-75; shared with `--update`'s staleness test |
+| `stamp()` | mtime → columns 59-75; clamps an mtime outside 1970..9999 to epoch 0; shared with `--update`'s staleness test |
 | `cached()` | `--update`: reuse the stored digest when size and mtime both match |
 
 `--verbose` alone prints progress and rates; totals and ETA need `--eta`, which
@@ -63,6 +63,10 @@ rather than `ENOENT`, a name outside the active code page is hashed through its
 8.3 short name (the path column is then approximate), and both are counted and
 warned about at the end. `cached()` falls back to whole seconds when either side
 carries a `.000000` fraction, so a `.dts` survives the Cygwin/Strawberry split.
+
+A corrupt filesystem timestamp (before 1970, past 9999) would make `%010d` emit
+eleven characters and shift every column after 58. Both generators clamp it to
+epoch 0, count it and warn at the end of the run.
 
 `--update` reuses the ordinary walk with `cached()` plugged in, so a refreshed
 inventory cannot drift from a generated one; `--add-missing` makes the two
