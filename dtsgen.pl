@@ -87,6 +87,7 @@ my ($nfile, $ndir, $nskip, $nerr, $next, $nbatch) = (0, 0, 0, 0, 0, 0);
 my ($nkept, $nrehash, $nnew, $ngone) = (0, 0, 0, 0);   # --update accounting
 my $nmangled = 0;           # opened via 8.3 short name; path column is lossy
 my $nlong    = 0;           # over the Windows MAX_PATH limit
+my $nbadtime = 0;           # mtime outside 1970..9999, recorded as epoch 0
 my $vol = 0;
 
 my (@files, %pos, %ext);    # pre-pass: file order; digests from sha1sum
@@ -117,8 +118,17 @@ sub utc {
 # columns 59-75.  Shared with --update, which compares the stored stamp against
 # the disk one: the comparison must round exactly like the writer, or every
 # entry would look stale.
+# 9999-12-31T23:59:59Z: past that, gmtime() would widen the UTC column too
+use constant MAXTIME => 253402300799;
+
 sub stamp {
     my $mtime = $_[0] // 0;
+    # Some filesystems hand out timestamps outside any sane range -- Windows
+    # itself then shows no "date modified".  Beyond breaking every consumer,
+    # a negative value breaks the fixed layout: "%010d" of a negative number
+    # is 11 characters wide, so the whole line shifts by one and every later
+    # column is wrong.  Record these as epoch 0; see the $nbadtime warning.
+    $mtime = 0 if $mtime < 0 || $mtime > MAXTIME;
     my $sec = int $mtime;
     my $us  = int(($mtime - $sec) * 1e6 + 0.5);
     if ($us > 999999) { $sec++; $us = 0 }
@@ -127,6 +137,7 @@ sub stamp {
 
 sub emit {
     my ($type, $raw, $size, $mtime, $path) = @_;
+    $nbadtime++ if defined $mtime && ($mtime < 0 || $mtime > MAXTIME);
     $size //= 0;
     my ($st, $sec) = stamp($mtime);
     $seen{$path} = 1 if $update;
@@ -450,6 +461,9 @@ if (defined $update) {
 }
 
 warn sprintf("done in %s, %s\n", hms(time() - $t0), go($vol)) if $verbose;
+warn "WARNING: $nbadtime entry/entries carry an mtime outside 1970..9999 and were\n"
+   . "         recorded as 1970-01-01.  The filesystem timestamp is corrupt;\n"
+   . "         Windows shows no \"date modified\" for these files either.\n" if $nbadtime;
 warn "WARNING: $nlong path(s) exceed the Windows MAX_PATH limit and are MISSING\n"
    . "         from this inventory.  Cygwin perl (MSYS2) handles them; Strawberry\n"
    . "         does not.  Workaround without admin rights:\n"

@@ -76,6 +76,7 @@ internal static class Program
 
     // ---- counters ----------------------------------------------------------
     private static long _nFile, _nDir, _nSkip, _nErr, _nCloud;
+    private static long _nBadTime;   // mtime outside 1970..9999, recorded as epoch 0
     private static long _nKept, _nRehash, _nNew, _nGone;
     private static long _vol, _totFile, _totBytes;
 
@@ -175,6 +176,12 @@ internal static class Program
         }
 
         if (_verbose) Console.Error.WriteLine($"done in {Hms(Now - _t0)}, {Go(_vol)}");
+        if (_nBadTime > 0)
+        {
+            Console.Error.WriteLine($"WARNING: {_nBadTime} entry/entries carry an mtime outside 1970..9999 and were");
+            Console.Error.WriteLine("         recorded as 1970-01-01.  The filesystem timestamp is corrupt;");
+            Console.Error.WriteLine("         Windows shows no \"date modified\" for these files either.");
+        }
         if (_nCloud > 0)
             Console.Error.WriteLine($"{_nCloud} cloud placeholder(s) skipped (--skip-cloud)");
         Console.Error.WriteLine($"{_nFile} files, {_nDir} dirs, {_nSkip} skipped, {_nErr} errors");
@@ -299,9 +306,26 @@ internal static class Program
     //  Formatting - columns 1-91 must match dtsgen.pl exactly
     // =======================================================================
 
+    // 9999-12-31T23:59:59Z: past that, the UTC column would widen too.
+    private const long MaxTime = 253402300799L;
+
+    /// <summary>True for an mtime no sane filesystem should report.</summary>
+    private static bool BadTime(long ticks)
+    {
+        long unixTicks = ticks - DateTime.UnixEpoch.Ticks;
+        return unixTicks < 0 || unixTicks / 10_000_000L > MaxTime;
+    }
+
     /// <summary>mtime ticks -> ("epoch.microseconds", whole seconds).</summary>
     private static (string, long) Stamp(long ticks)
     {
+        // Some filesystems hand out timestamps outside any sane range --
+        // Windows itself then shows no "date modified".  Beyond breaking every
+        // consumer, a negative value breaks the fixed layout: "D10" of a
+        // negative number is 11 characters wide, so the whole line shifts by
+        // one and every later column is wrong.  Record these as epoch 0; see
+        // the _nBadTime warning.
+        if (BadTime(ticks)) ticks = DateTime.UnixEpoch.Ticks;
         long unixTicks = ticks - DateTime.UnixEpoch.Ticks;    // 100 ns units
         long sec = Math.DivRem(unixTicks, 10_000_000L, out long rem);
         if (rem < 0) { sec--; rem += 10_000_000L; }
@@ -328,6 +352,7 @@ internal static class Program
 
     private static void Emit(char type, byte[] raw, long size, long ticks, string path)
     {
+        if (BadTime(ticks)) _nBadTime++;
         var (stamp, sec) = Stamp(ticks);
         if (_update is not null) Seen.Add(path);
         _out.Write(type);

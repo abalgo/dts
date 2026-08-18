@@ -50,6 +50,30 @@ Same machine, same trees, MSYS2 Perl as the reference:
 `sha1sum` figures in the main README, so **`--extern` has no reason to exist
 here** and is not implemented.
 
+### On a real disk
+
+Synthetic numbers flatter the port; these do not. Same machine, MSYS2 Perl as
+the reference, the second run of each pair benefiting from the file cache.
+
+| Tree | entries | `dtsgen.pl` | this port |
+|---|---|---|---|
+| `D:/Devel`, 26.2 GB on a spinning disk | 13 236 | 288 s | 338 s |
+| `AppData/Local/Arduino15/packages`, SSD | 60 494 | >600 s (killed at ~90 %) | 188 s |
+| `C:/Users/Arnaud/AppData`, 127 GB, SSD | 736 296 | not attempted | 1 h 44 |
+
+The first line is the honest one: on a spinning disk full of large files, both
+tools sit at ~80 MB/s waiting for the platter, and being faster at hashing buys
+nothing. The gain appears where the work is **metadata** — 60 k small files on
+an SSD — which is exactly where `lstat` under MSYS2 costs the most.
+
+The AppData run is the one the Perl generator cannot do properly: it holds
+**742 paths of 260 characters or more** (longest: 478) and 1599 non-ASCII names.
+Strawberry Perl would leave the first group out of the inventory entirely and
+mangle the second; MSYS2 Perl would take hours. Every one of the 736 296 mtimes
+came out with a real fraction — Strawberry would have written `.000000` on all
+of them. 153 files could not be read: browser and Comms databases held open by
+running processes, which any generator hits.
+
 ## Conformance
 
 ```sh
@@ -66,6 +90,19 @@ fixtures (22 trees), and a stress tree carrying a name with `!`, non-ANSI names
 and 2500 files in one directory. `--update` (both `FILE_new.dts` and
 `TmpDeleted.dts`, with the same counters) and `--check` were compared the same
 way.
+
+And on real data, which is what actually settles it:
+
+| Tree | result |
+|---|---|
+| `D:/Devel`, 13 236 entries | every hash, size and path identical; 154 lines differ on the microsecond digit alone, by at most 1 |
+| `Arduino15/packages`, first 54 000 entries | identical byte for byte, 75 of them on paths of 260 characters or more |
+| `Media Player` cache, 510 entries, 485 non-ASCII | identical byte for byte |
+| `AppData`, 736 296 entries | the whole file is valid UTF-8 end to end |
+
+The microsecond deltas are the documented `--perl-mtime` question, and nothing
+else: comparing `cut -c1-58,76-` — every column except `epoch.us` — the two
+inventories match exactly.
 
 ## Options
 
