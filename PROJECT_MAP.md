@@ -8,6 +8,7 @@ build step. See `README.md` for usage.
 | File | Category | Role |
 |---|---|---|
 | `dtsgen.pl` | CORE | inventory generator: walks a tree, writes a `.dts` |
+| `csharp/dtsgen/Program.cs` | CORE | C# port of the generator for Windows; byte-identical output |
 | `dts.pl` | CORE | query engine over a `.dts`: duplicates, `rm` scripts, `-update` |
 | `mutationstructure.pl` | CORE | diff of two `.dts` → `mv`/`rm` shell plan + projected `.dts` |
 | `README.md` | DOC | user-facing documentation |
@@ -16,6 +17,9 @@ build step. See `README.md` for usage.
 | `CLAUDE.md` | LOCAL | decisions, rationale, traps — git-ignored, not published |
 | `t/run-tests.sh`, `t/mkfixtures.sh`, `t/baseline/` | INFRA | test suite and reference plans |
 | `t_matching.pl` | INFRA | unit tests of the `dts.pl` expression parser and priority rules |
+| `csharp/compare.sh` | INFRA | conformance: C# output vs `dtsgen.pl`, byte for byte |
+| `csharp/dist/dtsgen.exe` | INFRA | committed self-contained build (11 MB, no runtime needed) |
+| `csharp/README.md` | DOC | what the C# port fixes, what it measures, what differs |
 | `LICENSE` | INFRA | MIT, Arnaud Bertrand |
 | `.gitignore` | INFRA | keeps `*.dts` and generated plans out of the repo |
 | `.claudeignore` | INFRA | keeps inventories out of agent context |
@@ -47,6 +51,12 @@ any .dts ──dts.pl──> duplicate report / rm script / updated .dts
 `--verbose` alone prints progress and rates; totals and ETA need `--eta`, which
 pays for a second `lstat` walk (implied by `--extern`, which needs the list
 anyway). `--out FILE` avoids PowerShell's UTF-16 `>` redirection.
+
+The C# port in `csharp/dtsgen/` mirrors this file sub for sub (`Entries`,
+`Prescan`, `Visit`, `Cached`, `Stamp`, `Emit`), so the two can be read side by
+side. It drops `--extern` (CNG hashing already beats `sha1sum`) and adds
+`--perl-mtime` (reproduce `Time::HiRes`' double rounding, for diffing) and
+`--skip-cloud`. `sh csharp/compare.sh` pins the byte-for-byte equality.
 
 Windows, Strawberry Perl only: a path over `MAX_PATH` is reported as `TOO LONG`
 rather than `ENOENT`, a name outside the active code page is hashed through its

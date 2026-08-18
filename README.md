@@ -83,6 +83,10 @@ APIs, so long paths and non-ANSI names simply work. Strawberry Perl is faster
 but hits both limits — see *Known limitations*. Under PowerShell, always write
 the inventory with `--out`, never with `>`.
 
+For Windows there is also a **C# build of the generator** in `csharp/`, which
+has neither limit and hashes about eight times faster than MSYS2 Perl. Its
+output is byte-for-byte the same `.dts`. See [csharp/README.md](csharp/README.md).
+
 On Termux: `pkg install perl` then `termux-fix-shebang *.pl`, or just call
 `perl dtsgen.pl ...`.
 

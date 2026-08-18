@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>dtsgen</AssemblyName>
+    <RootNamespace>Dts</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <!-- long paths are handled with the \\?\ prefix, but declaring the manifest
+         setting too makes plain paths work on Windows 10 1607+ as well -->
+    <UseWindowsForms>false</UseWindowsForms>
+  </PropertyGroup>
+
+</Project>

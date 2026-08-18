@@ -8,3 +8,11 @@ CLAUDE.md
 plan.sh
 tmpuniq.*
 *_new.dts
+
+# .NET build output of the C# port
+bin/
+obj/
+
+# ...but the shipped self-contained binary IS tracked (a global ignore rule
+# excludes *.exe, hence the explicit negation)
+!csharp/dist/dtsgen.exe
